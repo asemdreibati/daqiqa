@@ -173,7 +173,8 @@ database, which is part of the production deployment in wave 4.
 | Using a promise for another address | Tokens carry the promised location; a delivery point more than 100 m away is refused (`PROMISE_LOCATION_MISMATCH`) | Built |
 | Using a promise after the store stopped | Checkout checks that the store still accepts orders (`STORE_UNAVAILABLE`): at once on the instance that paused it, within the 30 s refresh on other replicas | Built |
 | Using one promise for two orders | At most one live order per promise (`PROMISE_ALREADY_USED`) | Built |
-| Weak or missing keys | Every configured key must be at least 32 bytes; the server refuses to start without an active key, and logs a warning at startup while the published development key signs promises | Built |
+| Weak or missing keys | Every configured key must be at least 32 bytes; the server refuses to start without an active key, and refuses to start at all when the published development key is configured while the `dev` profile is inactive (it only warns when it is) | Built |
+| A leaked key minting long-lived promises | Verification also refuses correctly signed tokens no instance issues: valid for longer than `daqiqa.promise.token.validity`, or issued more than 30 s in the future | Built |
 | Key compromise or routine rotation | Each token names its key (`kid`), so keys rotate without downtime (below) | Built |
 | Personal data | Tokens carry no customer identity, but they do carry the promised location in readable base64: treat a token like the address it was made for. The logging publisher and promise errors keep coordinates out of logs | Built |
 | Authentication and authorisation | None in v1: `customerId` comes from the request body and `GET /v1/orders/{orderId}` checks no ownership | OAuth2 with Keycloak in wave 4 |

@@ -123,9 +123,20 @@ docker compose -f deploy/compose/compose.yaml up -d    # PostgreSQL 17 and Kafka
 Then open <http://localhost:8080/swagger-ui.html>. Also useful: `/actuator/health`, `/actuator/prometheus` and
 `/v3/api-docs`.
 
+`bootRun` runs the **`dev` profile** (`application-dev.yaml`): the Dubai demo data and a signing key published in this
+repository. Every other way of starting the server brings its own keys and no demo data — and the server refuses to
+start with the development key unless that profile is active, so the published key can never sign promises in a real
+deployment:
+
+```bash
+java -jar apps/daqiqa-server/build/libs/daqiqa-server.jar \
+  --spring.profiles.active=dev                                     # local run of the packaged jar
+DAQIQA_PROMISE_TOKEN_KEY_ID=k1 DAQIQA_PROMISE_TOKEN_KEYS_K1=$(openssl rand -base64 32) \
+  java -jar apps/daqiqa-server/build/libs/daqiqa-server.jar        # anywhere else: your own key
+```
+
 Events go to Kafka by default. To run without a broker, start the server with `DAQIQA_EVENT_PUBLISHER=logging`: each
-event's envelope is logged and the event is marked published instead of sent. Promises are signed with a published
-development key until you configure your own, and the server logs a warning at startup while it does.
+event's envelope is logged and the event is marked published instead of sent.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -134,9 +145,9 @@ development key until you configure your own, and the server logs a warning at s
 | `DAQIQA_DB_POOL_SIZE` | `20` | Connection pool size per instance |
 | `DAQIQA_KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka brokers |
 | `DAQIQA_EVENT_PUBLISHER` | `kafka` | `logging` for runs without Kafka |
-| `DAQIQA_PROMISE_TOKEN_KEY_ID` | `dev` | Id of the key that signs promises; the startup warning appears while it is `dev` |
-| `DAQIQA_PROMISE_TOKEN_DEV_KEY` | a published development key | Base64 key of at least 32 bytes for the `dev` id. Real deployments set `daqiqa.promise.token.keys.<id>` from a secret store |
-| `DAQIQA_FLYWAY_LOCATIONS` | `classpath:db/migration,classpath:db/demo` | Drop `classpath:db/demo` to start without demo data |
+| `DAQIQA_PROMISE_TOKEN_KEY_ID` | none (`dev` profile: `dev`) | Id of the key that signs promises; without one the server does not start |
+| `DAQIQA_PROMISE_TOKEN_KEYS_<ID>` | none (`dev` profile: the published development key) | Base64 key of at least 32 bytes for `<id>`, from your secret store. Keys other than the active one only verify (rotation) |
+| `DAQIQA_FLYWAY_LOCATIONS` | `classpath:db/migration` (`dev` profile: plus `classpath:db/demo`) | Where Flyway reads migrations |
 | `DAQIQA_LOG_FORMAT` | plain text | `ecs` for JSON logs |
 
 **Tests.** `./gradlew build` checks formatting, compiles, and runs all 571 unit, property, integration, concurrency,

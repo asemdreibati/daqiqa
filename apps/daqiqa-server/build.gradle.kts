@@ -1,3 +1,5 @@
+import org.springframework.boot.gradle.tasks.run.BootRun
+
 plugins {
     id("daqiqa.spring-boot-application")
 }
@@ -24,4 +26,10 @@ dependencies {
     testImplementation(project(":platform:testing"))
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation(libs.archunit)
+}
+
+// bootRun is for local development: the dev profile brings the published development signing key and the Dubai demo
+// data. A system property rather than an argument, so that `bootRun --args=...` keeps it and can still override it.
+tasks.named<BootRun>("bootRun") {
+    systemProperty("spring.profiles.active", "dev")
 }

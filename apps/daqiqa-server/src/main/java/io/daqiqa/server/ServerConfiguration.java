@@ -1,19 +1,24 @@
 package io.daqiqa.server;
 
 import java.time.Clock;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 @Configuration(proxyBeanMethods = false)
 class ServerConfiguration {
 
-    private static final Logger log = LoggerFactory.getLogger(ServerConfiguration.class);
+    /**
+     * Refuses to start with the published development key unless the dev profile is active. Static, as a bean factory
+     * post-processor should be: it runs before any other bean exists, without creating this configuration early.
+     */
+    @Bean
+    static DevelopmentKeyGuard developmentKeyGuard(Environment environment) {
+        return new DevelopmentKeyGuard(environment);
+    }
 
     /**
      * The one clock every module reads time from (ADR-0011). Replaced by a controllable clock in tests and by an
@@ -38,16 +43,5 @@ class ServerConfiguration {
         scheduler.setWaitForTasksToCompleteOnShutdown(true);
         scheduler.setAwaitTerminationSeconds(10);
         return scheduler;
-    }
-
-    /** Makes it impossible to miss that a deployment is signing promises with the published development key. */
-    @Bean
-    ApplicationRunner developmentKeyWarning(@Value("${daqiqa.promise.token.active-key-id:}") String activeKeyId) {
-        return args -> {
-            if ("dev".equals(activeKeyId)) {
-                log.warn("Promise tokens are signed with the development key. Configure daqiqa.promise.token.* "
-                        + "with a secret key before exposing this instance.");
-            }
-        };
     }
 }

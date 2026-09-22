@@ -261,9 +261,10 @@ domain invariant.
 | `daqiqa.promise.token.validity` | `90s` | how long a promise can be turned into an order (1 s to 1 h) |
 | `daqiqa.promise.token.location-tolerance` | `100` | metres the delivery point may be from the promised one (positive) |
 
-This module ships no signing key. The server application must configure `daqiqa.promise.token.*`; the architect is
-adding a dev key, overridable by environment variables, at integration. Without a key the application refuses to
-start: *Failed to bind properties under 'daqiqa.promise' … No promise token signing key is configured: set
+This module ships no signing key, and neither does the server's default configuration: keys come from the
+deployment's secret store as `daqiqa.promise.token.keys.<id>` (`DAQIQA_PROMISE_TOKEN_KEYS_<ID>`). The published
+development key is in the server's `dev` profile alone, and the server refuses to start with it under any id while
+that profile is inactive (`DevelopmentKeyGuard`). Without a key the application refuses to start: *Failed to bind properties under 'daqiqa.promise' … No promise token signing key is configured: set
 daqiqa.promise.token.active-key-id=&lt;id&gt; and daqiqa.promise.token.keys.&lt;id&gt;=&lt;base64 key of at least 32
 bytes&gt;*. Rotation: add the new key everywhere, make it active, remove the old one once its tokens have expired.
 
