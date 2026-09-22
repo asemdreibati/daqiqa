@@ -11,9 +11,11 @@ final class RecordingPublisher implements EventPublisher {
     private final List<UUID> published = new CopyOnWriteArrayList<>();
     private volatile Predicate<PendingEvent> failing = event -> false;
     private volatile Predicate<PendingEvent> crashing = event -> false;
+    private volatile Runnable beforePublish = () -> {};
 
     @Override
     public void publish(PendingEvent event) {
+        beforePublish.run();
         if (crashing.test(event)) {
             throw new SimulatedCrash();
         }
@@ -31,6 +33,11 @@ final class RecordingPublisher implements EventPublisher {
     /** Events matching the predicate kill the relay's thread with an {@link Error}, as a crashed process would. */
     void crashWhen(Predicate<PendingEvent> predicate) {
         crashing = predicate;
+    }
+
+    /** Runs before every publication, successful or not: how a test makes the broker slow. */
+    void beforeEachPublish(Runnable action) {
+        beforePublish = action;
     }
 
     void heal() {

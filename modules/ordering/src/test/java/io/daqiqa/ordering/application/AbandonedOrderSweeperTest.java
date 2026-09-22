@@ -103,6 +103,49 @@ class AbandonedOrderSweeperTest extends OrderingIntegrationTest {
         assertThat(meters.counter("daqiqa.ordering.sweeper.failures").count()).isEqualTo(failuresBefore + 1);
     }
 
+    @Test
+    void givesUpOnAnOrderWhoseStockRowsSomeoneElseHoldsAndAbandonsItOnTheNextSweep() throws Exception {
+        OrderId stuck = checkoutThatDies("stuck-order-1", new SkuQuantity(MILK.sku(), 1));
+        clock.advance(Duration.ofMinutes(6));
+        // Stand in for the inventory's FOR UPDATE on the store's stock rows, which live checkouts hold under load.
+        inventory.beforeNextRelease(
+                () -> jdbc.sql("SELECT line_no FROM ordering.order_line WHERE order_id = :id FOR UPDATE")
+                        .param("id", stuck.value())
+                        .query(Integer.class)
+                        .list());
+        double contentionBefore =
+                meters.counter("daqiqa.ordering.sweeper.contention").count();
+        double failuresBefore =
+                meters.counter("daqiqa.ordering.sweeper.failures").count();
+
+        try (Connection holder = PostgresTestDatabase.shared().dataSource().getConnection()) {
+            holder.setAutoCommit(false);
+            try (PreparedStatement lock =
+                    holder.prepareStatement("SELECT line_no FROM ordering.order_line WHERE order_id = ? FOR UPDATE")) {
+                lock.setObject(1, stuck.value());
+                lock.executeQuery().close();
+            }
+
+            assertThat(sweeper.sweep())
+                    .as("the lock wait ran out; no error, nothing half-done")
+                    .isZero();
+
+            holder.rollback();
+        }
+
+        assertThat(orderStatus(stuck)).contains("AWAITING_PAYMENT");
+        assertThat(inventory.reservationsFor(stuck.toString()).getFirst().status())
+                .isEqualTo(Status.HELD);
+        assertThat(outboxEventTypes()).as("nothing was announced").isEmpty();
+        assertThat(meters.counter("daqiqa.ordering.sweeper.contention").count())
+                .as("counted as contention, not as a failure")
+                .isEqualTo(contentionBefore + 1);
+        assertThat(meters.counter("daqiqa.ordering.sweeper.failures").count()).isEqualTo(failuresBefore);
+
+        assertThat(sweeper.sweep()).as("the next sweep gets the lock").isEqualTo(1);
+        assertThat(orderStatus(stuck)).contains("ABANDONED");
+    }
+
     /** A card checkout whose instance dies during the payment: the order waits for it with its stock held. */
     private OrderId checkoutThatDies(String key, SkuQuantity line) {
         payments.crash();

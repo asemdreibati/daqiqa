@@ -30,6 +30,13 @@ import org.springframework.transaction.support.TransactionTemplate;
  * default), and nothing after it is published meanwhile: a broker outage costs little retry traffic, and a poison
  * event blocks the relay until someone fixes it, which is why failures and the backlog are metrics worth alerting on.
  *
+ * <p><b>Why a round is time-boxed.</b> Publication happens inside the transaction that locked the batch, which is what
+ * makes "published" and "marked published" agree. A slow but working broker could otherwise keep that transaction open
+ * for the whole batch ({@code batch-size} times the send timeout), and a long-running transaction holds back
+ * {@code VACUUM} across the whole database, hot tables included. Once {@code daqiqa.messaging.relay.max-batch-duration}
+ * is used up, the round stops starting publications, marks what it published and commits; the rest of the batch
+ * follows in the next round. The transaction therefore stays open for about the budget plus one send timeout.
+ *
  * <p><b>Delivery is at-least-once.</b> If the process dies after the broker acknowledged an event but before the round
  * committed, the event is published again by the next leader. Consumers deduplicate on the event id.
  *
@@ -37,6 +44,15 @@ import org.springframework.transaction.support.TransactionTemplate;
  * transactions that append them are serialised by the aggregate's own row lock, so a later event also gets a higher
  * {@code seq} and becomes visible only after the earlier one committed. Events of unrelated transactions for the same
  * store may interleave; that is fine because they are not causally related.
+ *
+ * <p><b>The trade-off that remains.</b> One stream for everything means head-of-line blocking: an event that cannot be
+ * published stops every store's events, not only its own, and a single relay's throughput is one event per
+ * acknowledgement. That is the price of per-key order with one queue, and it is why the backlog and the failure counter
+ * are the metrics to alert on. Breaking it needs a different design, not a bigger batch: a lease-based relay that takes
+ * a range of {@code seq} values, commits the transaction, publishes outside it and marks the range afterwards (at the
+ * cost of publishing an acknowledged event again after a crash, which consumers already tolerate), partitioned per
+ * topic or key range so that one bad event only blocks its own partition, or change data capture on this table
+ * (ADR-0009).
  */
 @Component
 class OutboxRelay {
@@ -49,6 +65,7 @@ class OutboxRelay {
     private final Clock clock;
     private final MeterRegistry meters;
     private final int batchSize;
+    private final Duration maxBatchDuration;
     private final Duration initialBackoff;
     private final Duration maxBackoff;
 
@@ -65,6 +82,7 @@ class OutboxRelay {
         this.clock = clock;
         this.meters = meters;
         this.batchSize = properties.relay().batchSize();
+        this.maxBatchDuration = properties.relay().maxBatchDuration();
         this.initialBackoff = properties.relay().initialBackoff();
         this.maxBackoff = properties.relay().maxBackoff();
     }
@@ -84,12 +102,22 @@ class OutboxRelay {
             return RelayRound.SKIPPED;
         }
         Instant now = clock.instant();
+        Instant budgetEnds = now.plus(maxBatchDuration);
         List<PendingEvent> batch = repository.lockNextBatch(batchSize);
         List<PendingEvent> published = new ArrayList<>(batch.size());
         boolean failed = false;
         for (PendingEvent event : batch) {
             if (event.nextAttemptAt() != null && now.isBefore(event.nextAttemptAt())) {
                 break; // it failed recently and waits out its backoff; nothing after it may overtake it
+            }
+            // Always publish one event, however small the budget, so that a round cannot stop without progress.
+            if (!published.isEmpty() && !clock.instant().isBefore(budgetEnds)) {
+                log.debug(
+                        "Relay round published {} of {} locked events within {}; the rest follows in the next round",
+                        published.size(),
+                        batch.size(),
+                        maxBatchDuration);
+                break;
             }
             // Any exception from the publisher is a failed publication of this event, whatever its type: record it and
             // stop, rather than rolling back the whole round and re-publishing everything before it.

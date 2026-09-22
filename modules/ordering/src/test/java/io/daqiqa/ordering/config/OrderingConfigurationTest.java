@@ -23,7 +23,7 @@ class OrderingConfigurationTest {
                 .isEqualTo(new OrderingProperties(
                         Duration.ofMinutes(5),
                         new Idempotency(Duration.ofSeconds(60), Duration.ofHours(24), Duration.ofHours(1), 1000),
-                        new Sweeper(Duration.ofSeconds(30), 100),
+                        new Sweeper(Duration.ofSeconds(30), 100, Duration.ofMillis(500)),
                         new Payment(new BigDecimal("1000.00"), Duration.ZERO))));
     }
 

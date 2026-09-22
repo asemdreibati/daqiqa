@@ -16,6 +16,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -161,6 +162,42 @@ class OutboxRelayTest {
     }
 
     @Test
+    void stopsTakingNewEventsWhenTheRoundsTimeBudgetIsUsedUpAndKeepsWhatItPublished() {
+        List<StockAdjustedV1> events = IntStream.rangeClosed(1, 5)
+                .mapToObj(onHand -> stockAdjusted("DXB-MARINA", onHand))
+                .toList();
+        outbox.appendCommitted(events);
+        MovableClock clock = new MovableClock();
+        publisher.beforeEachPublish(() -> clock.advance(Duration.ofSeconds(1))); // a slow but working broker
+        OutboxRelay relay = relayWithin(clock, Duration.ofSeconds(2));
+
+        assertThat(relay.relay())
+                .as("two sends fit in the budget; the transaction commits instead of holding its locks for five")
+                .isEqualTo(new RelayRound(true, 2, false));
+        assertThat(outbox.unpublishedIds()).hasSize(3);
+
+        assertThat(relay.relay()).isEqualTo(new RelayRound(true, 2, false));
+        assertThat(relay.relay()).isEqualTo(new RelayRound(true, 1, false));
+
+        assertThat(publisher.published()).containsExactlyElementsOf(ids(events));
+        assertThat(outbox.unpublishedIds()).isEmpty();
+    }
+
+    @Test
+    void publishesOneEventPerRoundEvenWhenEverySendOutlastsTheBudget() {
+        List<StockAdjustedV1> events = List.of(stockAdjusted("DXB-MARINA", 1), stockAdjusted("DXB-MARINA", 2));
+        outbox.appendCommitted(events);
+        MovableClock clock = new MovableClock();
+        publisher.beforeEachPublish(() -> clock.advance(Duration.ofSeconds(30)));
+
+        OutboxRelay relay = relayWithin(clock, Duration.ofSeconds(2));
+
+        assertThat(relay.relay()).as("a round never stops without progress").isEqualTo(new RelayRound(true, 1, false));
+        assertThat(relay.relay()).isEqualTo(new RelayRound(true, 1, false));
+        assertThat(outbox.unpublishedIds()).isEmpty();
+    }
+
+    @Test
     void anEventIsPublishedAgainIfTheRelayDiesBeforeCommittingItsRound() {
         List<StockAdjustedV1> events = List.of(stockAdjusted("DXB-MARINA", 1), stockAdjusted("DXB-MARINA", 2));
         outbox.appendCommitted(events);
@@ -275,6 +312,17 @@ class OutboxRelayTest {
                 properties(10, 1000, maxBackoff));
     }
 
+    /** A relay on a clock the publisher moves, with {@code budget} to start publications in. */
+    private OutboxRelay relayWithin(Clock clock, Duration budget) {
+        return new OutboxRelay(
+                outbox.repository,
+                publisher,
+                outbox.transactionManager,
+                clock,
+                meters,
+                properties(10, 1000, Duration.ofMinutes(5), budget));
+    }
+
     private Instant nextAttemptAt(UUID id) {
         return outbox.jdbc
                 .sql("SELECT next_attempt_at FROM messaging.outbox_event WHERE id = :id")
@@ -292,6 +340,31 @@ class OutboxRelayTest {
             barrier.await();
         } catch (Exception e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    /** A clock the slow publisher moves on, so that a time-boxed round is exact and takes no real time. */
+    private static final class MovableClock extends Clock {
+
+        private Instant now = NOW;
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+
+        void advance(Duration by) {
+            now = now.plus(by);
         }
     }
 }

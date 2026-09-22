@@ -42,6 +42,11 @@ public record MessagingProperties(
     /**
      * @param interval pause between two relay rounds ({@code daqiqa.messaging.relay.interval})
      * @param batchSize maximum number of events published per round
+     * @param maxBatchDuration how long a round may keep starting publications. Once it is used up, the round marks
+     *     what it published and commits the transaction that holds the batch's row locks, rather than keeping it open
+     *     for up to the batch size times the send timeout: a long transaction keeps {@code VACUUM} from cleaning up
+     *     dead rows in every table, hot ones included. A round always publishes at least one event, so the smallest
+     *     budget still makes progress
      * @param initialBackoff wait before retrying an event whose publication failed once; doubled at every further
      *     failure
      * @param maxBackoff the longest wait between two attempts at a failing event
@@ -49,6 +54,7 @@ public record MessagingProperties(
     public record Relay(
             @DefaultValue(Relay.DEFAULT_INTERVAL) Duration interval,
             @DefaultValue("100") int batchSize,
+            @DefaultValue("2s") Duration maxBatchDuration,
             @DefaultValue("1s") Duration initialBackoff,
             @DefaultValue("5m") Duration maxBackoff) {
 
@@ -58,6 +64,7 @@ public record MessagingProperties(
         public Relay {
             requirePositive(interval, "daqiqa.messaging.relay.interval");
             requirePositive(batchSize, "daqiqa.messaging.relay.batch-size");
+            requirePositive(maxBatchDuration, "daqiqa.messaging.relay.max-batch-duration");
             requirePositive(initialBackoff, "daqiqa.messaging.relay.initial-backoff");
             requirePositive(maxBackoff, "daqiqa.messaging.relay.max-backoff");
             if (maxBackoff.compareTo(initialBackoff) < 0) {

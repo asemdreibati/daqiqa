@@ -74,6 +74,7 @@ public final class FakeInventory implements InventoryReservations {
     private final Map<ReservationId, RuntimeException> releaseFailures = new HashMap<>();
     private @Nullable Runnable afterRollbackOfRefusal;
     private final AtomicReference<@Nullable Gate> nextHeldReservation = new AtomicReference<>();
+    private final AtomicReference<@Nullable Runnable> beforeNextRelease = new AtomicReference<>();
 
     public FakeInventory(Clock clock, PlatformTransactionManager transactionManager) {
         this.clock = clock;
@@ -119,6 +120,14 @@ public final class FakeInventory implements InventoryReservations {
         return gate;
     }
 
+    /**
+     * Runs {@code action} inside the next {@link #release}, in the caller's transaction and before anything is
+     * released: how a test makes the inventory take the locks it really takes.
+     */
+    public void beforeNextRelease(Runnable action) {
+        beforeNextRelease.set(action);
+    }
+
     /** Releasing this reservation fails with {@code failure} until {@link #reset()}. */
     public void failReleasesOf(ReservationId reservationId, RuntimeException failure) {
         locked(() -> releaseFailures.put(reservationId, failure));
@@ -132,6 +141,7 @@ public final class FakeInventory implements InventoryReservations {
             nextReserveFailure = null;
             afterRollbackOfRefusal = null;
             nextHeldReservation.set(null);
+            beforeNextRelease.set(null);
             return null;
         });
     }
@@ -205,6 +215,10 @@ public final class FakeInventory implements InventoryReservations {
 
     @Override
     public void release(ReservationId reservationId, ReleaseReason reason) {
+        Runnable before = beforeNextRelease.getAndSet(null);
+        if (before != null) {
+            before.run(); // outside the fake's lock: it may block on the database, as the real inventory does
+        }
         locked(() -> {
             RuntimeException failure = releaseFailures.get(reservationId);
             if (failure != null) {
