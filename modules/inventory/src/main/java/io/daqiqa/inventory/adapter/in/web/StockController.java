@@ -34,8 +34,8 @@ class StockController {
     @GetMapping
     StockLevelsDto levels(
             @PathVariable String storeId, @RequestParam @Size(min = 1, max = MAX_SKUS_PER_REQUEST) List<String> sku) {
-        StoreId store = StoreId.of(storeId);
-        List<Sku> requested = sku.stream().map(Sku::of).distinct().toList();
+        StoreId store = Identifiers.storeId(storeId);
+        List<Sku> requested = sku.stream().map(Identifiers::sku).distinct().toList();
         StoreStock levels = stock.levels(store, requested);
         return new StockLevelsDto(
                 store.value(),
@@ -44,6 +44,6 @@ class StockController {
 
     @PostMapping("/adjustments")
     StockLevelDto adjust(@PathVariable String storeId, @Valid @RequestBody StockAdjustmentRequest request) {
-        return StockLevelDto.from(stock.adjust(request.toCommand(StoreId.of(storeId))));
+        return StockLevelDto.from(stock.adjust(request.toCommand(Identifiers.storeId(storeId))));
     }
 }

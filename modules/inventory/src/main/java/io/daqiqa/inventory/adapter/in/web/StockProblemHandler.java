@@ -78,9 +78,12 @@ class StockProblemHandler {
                 "The request body is missing or is not valid JSON of the expected shape");
     }
 
-    /** Value objects reject malformed identifiers (a bad store id or SKU) with IllegalArgumentException. */
+    /**
+     * A malformed store id or SKU. Only identifiers parsed from the request land here; any other
+     * IllegalArgumentException is a server-side failure and stays a 500 that does not echo its message.
+     */
     @ExceptionHandler
-    ProblemDetail invalidInput(IllegalArgumentException e) {
+    ProblemDetail malformedIdentifier(MalformedIdentifierException e) {
         return problem(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Invalid request", e.getMessage());
     }
 

@@ -3,7 +3,6 @@ package io.daqiqa.inventory.adapter.in.web;
 import io.daqiqa.inventory.application.AdjustStock;
 import io.daqiqa.inventory.domain.AdjustmentReason;
 import io.daqiqa.inventory.domain.StockLevel;
-import io.daqiqa.kernel.Sku;
 import io.daqiqa.kernel.StoreId;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -41,7 +40,7 @@ final class StockMessages {
         AdjustStock toCommand(StoreId storeId) {
             return new AdjustStock(
                     storeId,
-                    Sku.of(Objects.requireNonNull(sku, "sku")),
+                    Identifiers.sku(Objects.requireNonNull(sku, "sku")),
                     Objects.requireNonNull(delta, "delta"),
                     Objects.requireNonNull(reason, "reason"));
         }

@@ -182,6 +182,18 @@ class StockControllerTest {
             verifyNoInteractions(stock);
         }
 
+        @Test
+        void aFailureDeeperDownIsNotBlamedOnTheClient() {
+            given(stock.adjust(any())).willThrow(new IllegalArgumentException("stock row corrupt: reserved -1"));
+
+            assertThat(post("""
+                            {"sku": "MILK-FULL-1L", "delta": 5, "reason": "RECEIVED"}"""))
+                    .as("not mapped to a 400 that echoes the message; the server answers 500")
+                    .hasFailed()
+                    .failure()
+                    .hasRootCauseInstanceOf(IllegalArgumentException.class);
+        }
+
         private MvcTestResult post(String json) {
             return mvc.post()
                     .uri("/v1/stores/DXB-MARINA/stock/adjustments")
