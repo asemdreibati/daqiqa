@@ -11,7 +11,11 @@ public final class InvalidPromiseException extends RuntimeException {
         /** Valid, but its short validity window has passed; ask for a new promise. */
         EXPIRED,
         /** Valid, but issued for a different basket. */
-        CART_MISMATCH
+        CART_MISMATCH,
+        /** Valid, but issued for a different delivery location (the address changed after the quote). */
+        LOCATION_MISMATCH,
+        /** Valid, but the promised store stopped accepting orders since (paused, closed); ask for a new promise. */
+        STORE_UNAVAILABLE
     }
 
     private final Reason reason;
