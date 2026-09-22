@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 class EventContractTest {
 
     private static final List<Class<? extends IntegrationEvent>> EVENTS =
-            List.of(OrderPlacedV1.class, StockAdjustedV1.class, ReservationExpiredV1.class);
+            List.of(OrderPlacedV1.class, OrderAbandonedV1.class, StockAdjustedV1.class, ReservationExpiredV1.class);
 
     @Test
     void everyEventIsARecordWithAVersionedTypeName() throws Exception {
