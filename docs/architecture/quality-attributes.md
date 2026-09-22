@@ -40,6 +40,39 @@ below run against real PostgreSQL; the property tests exercise the domain model 
 | One promise, one live order | Partial unique index on `promise_id` for live orders; a per-promise advisory lock before any stock is held | `CheckoutConcurrencyTest`: 8 keys racing under one promise → one order, the others `PROMISE_ALREADY_USED` holding no stock |
 | No event lost, none published twice by the relay | Advisory lock per round; rows marked published only after Kafka acknowledges | `OutboxRelayTest`: two relays in parallel never publish a row twice and keep the order; a relay dying before commit publishes again. `CheckoutEndToEndTest`: a retried checkout leaves exactly one `OrderPlacedV1` |
 
+## Server-level invariants
+
+The tests above defend each invariant where it lives, with the neighbouring modules faked. These defend the same
+invariants through the **whole assembled server**: every module real, requests over HTTP, real PostgreSQL with the
+Dubai demo data, and the sweepers and the outbox relay running on the server's scheduler
+(`apps/daqiqa-server/src/test/java/io/daqiqa/server`). Every scenario fires its requests through a start gate so that
+they really collide, and after each one the same check runs over the whole database (`ServerInvariants`), reading one
+snapshot so that a job committing meanwhile cannot make balanced books look unbalanced:
+
+| Checked after every scenario | What it means |
+|---|---|
+| The stock ledger balances | For every (store, SKU), `reserved` equals the units of its `HELD` and `CONFIRMED` reservation lines, and `0 ≤ reserved ≤ on_hand` |
+| Orders and holds pair up | Every live order (`AWAITING_PAYMENT`, `CONFIRMED`) has exactly one active reservation — its own, at its store, confirmed exactly when the order is — and every active reservation belongs to a live order |
+| Every outcome is announced once | Exactly one `OrderPlacedV1` per `CONFIRMED` order, exactly one `OrderAbandonedV1` per `ABANDONED` order (only card orders reach that state), no order has both, no such event names an order that does not exist, and every abandoned card order tells payments that an authorization may exist |
+| The server comes to rest | Once every checkout has been answered, no order still waits for its payment and the relay has published every event |
+| No answer was a server error | No 5xx at all: a deadlock, a lock timeout or any unexpected failure would show up here |
+
+| Scenario | What it fires at the server | What must come out |
+|---|---|---|
+| **Many keys, one promise** (`ConcurrentCheckoutInvariantsTest`) | 16 checkouts under one promise at once, each with its own idempotency key, as an app that makes up a new key per retry would send them | One `201`, fifteen `409 PROMISE_ALREADY_USED`, one order under the promise, one unit held |
+| **Contended last units** | 16 customers, each with their own promise and key, race for the 5 units one store has left | Exactly 5 orders, 11 × `409 OUT_OF_STOCK` with the shortage, nothing but `201` and `409` (no deadlock, no lock timeout), `available = 0` afterwards |
+| **Mixed load with retries** | 12 checkouts — cash, approved cards, and cards above the 1,000 AED decline limit — each submitted three times at once, every basket sharing one stock row | Per key exactly one answer that did the work, the others replaying it byte for byte or `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`; a later retry replays it too; declines hold nothing (`PAYMENT_FAILED`, reservation released); `reserved` grew by exactly the confirmed units |
+| **Payment outlives its hold** (`PaymentOutlivesHoldTest`, its own context: a clock the test moves, 2 s payments, sweeps every few hundred milliseconds) | A card checkout whose hold runs out while its payment is in flight, three times for each order of the race: the sweepers first, and the checkout first — held at the reservation's row lock while the clock passes the hold, so the sweepers, which skip locked rows, cannot get in front of it | `409 HOLD_EXPIRED`, the order `ABANDONED`, the stock back on sale exactly once, and exactly one `OrderAbandonedV1` with `paymentAuthorizationMayExist = true`: `HOLD_EXPIRED` when a sweeper won, `PAID_AFTER_HOLD_EXPIRED` when the checkout did |
+
+Both orders of that race are exercised on every run — the second one deterministically — and all three interleavings
+of the two sweepers and the checkout have been observed. Together the two classes take about 30 seconds on a 2-vCPU
+machine, most of it the two Spring contexts and the six deliberate 2-second payments.
+
+What this suite adds to the module tests: it proves that the guarantees survive **composition**. A module test can
+only show that its own invariant holds against its own fakes; here the promise, the catalog, the inventory's locks,
+the ordering transactions, the idempotency keys, the outbox and the background jobs all run at once, against one
+database, under load.
+
 ## Metrics
 
 Names as registered with Micrometer. Prometheus replaces dots with underscores and adds `_seconds` to timers and

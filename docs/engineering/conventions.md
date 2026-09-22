@@ -114,9 +114,26 @@ package-private.
 | Web slice tests | `src/test/.../adapter/in/web` | `@WebMvcTest`, `MockMvcTester`, `@MockitoBean` |
 | Architecture tests | `ArchitectureTest` per module + server | `ArchitectureRules` |
 | End-to-end | `apps/daqiqa-server` tests | `@SpringBootTest`, real HTTP |
+| Server-level invariants and chaos | `apps/daqiqa-server` tests | `@SpringBootTest` over HTTP with the real sweepers and relay; `ServerInvariants` after every scenario |
 
 Test names are sentences about behaviour: `rejectsAReservationThatWouldOversell()`. A bug fix starts with a failing
 test. Tests must not depend on execution order or wall-clock time (use a fixed or mutable `Clock`).
+
+Correctness under concurrency is proven twice: per module against its own fakes, and once more through the whole
+assembled server, where every module, the sweepers and the relay run together
+([quality attributes](../architecture/quality-attributes.md#server-level-invariants)). A server test that moves the
+clock or changes the sweeper intervals gets `@DirtiesContext`, so its scheduled jobs stop with the class instead of
+running into the next one.
+
+`PostgresTestDatabase` (`platform/testing`):
+
+- `migrate(...)` hands Flyway **every location requested so far in this JVM**, not only the new ones. Flyway refuses
+  to validate an applied migration it cannot resolve, so a class migrating a subset of what an earlier class migrated
+  would otherwise fail, and the suite would depend on the order its classes happen to run in.
+- Its pool allows 64 connections for concurrency tests but keeps only 2 open while idle, and the Testcontainers
+  PostgreSQL starts with `max_connections=300`: each Spring context under test adds a pool of 20
+  (`DAQIQA_DB_POOL_SIZE`), and idle connections held "just in case" used to push a single test JVM past the 100 a
+  default PostgreSQL accepts.
 
 ## Git
 
