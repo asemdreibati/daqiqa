@@ -83,7 +83,7 @@ public abstract class OrderingIntegrationTest {
     /** A checkout of {@code basket}, under a promise just issued for exactly that basket. */
     protected PlaceOrderCommand checkoutOf(PaymentMethod paymentMethod, SkuQuantity... basket) {
         List<SkuQuantity> lines = List.of(basket);
-        String token = promises.issue(STORE, DeliveryTier.EXPRESS_15, 12, lines);
+        String token = promises.issue(STORE, DeliveryTier.EXPRESS_15, 12, lines, HOME);
         return new PlaceOrderCommand(CUSTOMER, token, lines, HOME, paymentMethod);
     }
 

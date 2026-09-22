@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.daqiqa.contracts.events.OrderPlacedV1;
 import io.daqiqa.inventory.api.ReleaseReason;
+import io.daqiqa.kernel.GeoPoint;
 import io.daqiqa.kernel.OrderId;
 import io.daqiqa.ordering.domain.PaymentMethod;
 import io.daqiqa.ordering.testsupport.FakeInventory.Reservation;
@@ -206,7 +207,7 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
 
     @Test
     void rejectsAPromiseMadeForAnotherBasket() {
-        String token = promises.issue(STORE, DeliveryTier.EXPRESS_15, 12, List.of(line(MILK, 1)));
+        String token = promises.issue(STORE, DeliveryTier.EXPRESS_15, 12, List.of(line(MILK, 1)), HOME);
         PlaceOrderCommand command =
                 new PlaceOrderCommand(CUSTOMER, token, List.of(line(MILK, 2)), HOME, PaymentMethod.CARD);
 
@@ -214,6 +215,31 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
 
         assertRejected(response, 422, "PROMISE_CART_MISMATCH");
         assertNothingHeldOrOrdered(response.orderId());
+    }
+
+    @Test
+    void rejectsAPromiseMadeForAnotherAddressAndStoresTheAnswer() {
+        PlaceOrderCommand quoted = checkoutOf(PaymentMethod.CARD, line(MILK, 1));
+        PlaceOrderCommand elsewhere = new PlaceOrderCommand(
+                CUSTOMER, quoted.promiseToken(), quoted.lines(), GeoPoint.of(25.2048, 55.2708), PaymentMethod.CARD);
+
+        CheckoutResponse response = checkout.placeOrder(KEY, elsewhere);
+
+        assertRejected(response, 422, "PROMISE_LOCATION_MISMATCH");
+        assertNothingHeldOrOrdered(response.orderId());
+        assertReplayed(elsewhere, response);
+    }
+
+    @Test
+    void answersStoreUnavailableWhenThePromisedStoreStoppedTakingOrdersAndStoresTheAnswer() {
+        PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 1));
+        promises.storeStopsTakingOrders(STORE);
+
+        CheckoutResponse response = checkout.placeOrder(KEY, command);
+
+        assertRejected(response, 409, "STORE_UNAVAILABLE");
+        assertNothingHeldOrOrdered(response.orderId());
+        assertReplayed(command, response);
     }
 
     @Test

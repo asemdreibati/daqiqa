@@ -64,7 +64,7 @@ class CheckoutFlow {
     private Admission admit(PlaceOrderCommand command) {
         VerifiedPromise promise;
         try {
-            promise = promises.verify(command.promiseToken(), command.lines());
+            promise = promises.verify(command.promiseToken(), command.lines(), command.deliveryLocation());
         } catch (InvalidPromiseException e) {
             return new Admission.Refused(new CheckoutRejection.PromiseRejected(e.reason()));
         }

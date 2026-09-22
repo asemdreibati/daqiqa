@@ -48,6 +48,20 @@ final class Problems {
                                 "PROMISE_CART_MISMATCH",
                                 "Promise is for another basket",
                                 "The basket differs from the one the promise was made for. Ask for a new promise.");
+                    case LOCATION_MISMATCH ->
+                        of(
+                                HttpStatus.UNPROCESSABLE_CONTENT,
+                                "PROMISE_LOCATION_MISMATCH",
+                                "Promise is for another address",
+                                "The delivery address differs from the one the promise was made for. Ask for a new "
+                                        + "promise for this address.");
+                    case STORE_UNAVAILABLE ->
+                        of(
+                                HttpStatus.CONFLICT,
+                                "STORE_UNAVAILABLE",
+                                "Store unavailable",
+                                "The store that made this promise has stopped taking orders for now. Ask for a new "
+                                        + "promise.");
                     case MALFORMED, TAMPERED ->
                         of(
                                 HttpStatus.UNPROCESSABLE_CONTENT,

@@ -1,5 +1,6 @@
 package io.daqiqa.ordering.testsupport;
 
+import io.daqiqa.kernel.GeoPoint;
 import io.daqiqa.kernel.PromiseId;
 import io.daqiqa.kernel.SkuQuantity;
 import io.daqiqa.kernel.StoreId;
@@ -19,8 +20,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Verifier honouring the {@link PromiseTokenVerifier} contract without cryptography: tokens are issued by the test and
- * fail for the same reasons, in the same order, as real ones (unknown, tampered, expired against the clock, other
- * basket).
+ * fail for the same reasons as real ones (unknown, tampered, expired against the clock, another basket, another
+ * address, a store that stopped taking orders). An exact location match stands in for the real verifier's tolerance.
  */
 public final class FakePromiseTokenVerifier implements PromiseTokenVerifier {
 
@@ -30,18 +31,20 @@ public final class FakePromiseTokenVerifier implements PromiseTokenVerifier {
     private final Clock clock;
     private final Map<String, Issued> issued = new ConcurrentHashMap<>();
     private final Set<String> tampered = ConcurrentHashMap.newKeySet();
+    private final Set<StoreId> unavailable = ConcurrentHashMap.newKeySet();
 
     public FakePromiseTokenVerifier(Clock clock) {
         this.clock = clock;
     }
 
-    /** A token promising {@code etaMinutes} from {@code store} for exactly {@code basket}, valid from now. */
-    public String issue(StoreId store, DeliveryTier tier, int etaMinutes, List<SkuQuantity> basket) {
+    /** A token promising {@code etaMinutes} from {@code store} for exactly this basket and address, valid from now. */
+    public String issue(
+            StoreId store, DeliveryTier tier, int etaMinutes, List<SkuQuantity> basket, GeoPoint deliveryLocation) {
         Instant now = clock.instant();
         VerifiedPromise promise =
                 new VerifiedPromise(PromiseId.newId(), store, tier, etaMinutes, now, now.plus(VALIDITY));
         String token = "v1.test." + promise.promiseId();
-        issued.put(token, new Issued(promise, canonical(basket)));
+        issued.put(token, new Issued(promise, canonical(basket), deliveryLocation));
         return token;
     }
 
@@ -54,13 +57,19 @@ public final class FakePromiseTokenVerifier implements PromiseTokenVerifier {
         tampered.add(token);
     }
 
+    /** The store stops taking orders (paused or closed), so its outstanding promises can no longer be honoured. */
+    public void storeStopsTakingOrders(StoreId store) {
+        unavailable.add(store);
+    }
+
     public void reset() {
         issued.clear();
         tampered.clear();
+        unavailable.clear();
     }
 
     @Override
-    public VerifiedPromise verify(String token, List<SkuQuantity> lines) {
+    public VerifiedPromise verify(String token, List<SkuQuantity> lines, GeoPoint deliveryLocation) {
         Issued promise = issued.get(token);
         if (promise == null) {
             throw new InvalidPromiseException(Reason.MALFORMED, "Not a token we issued");
@@ -74,6 +83,12 @@ public final class FakePromiseTokenVerifier implements PromiseTokenVerifier {
         if (!canonical(lines).equals(promise.basket())) {
             throw new InvalidPromiseException(Reason.CART_MISMATCH, "Promise was made for another basket");
         }
+        if (!deliveryLocation.equals(promise.deliveryLocation())) {
+            throw new InvalidPromiseException(Reason.LOCATION_MISMATCH, "Promise was made for another address");
+        }
+        if (unavailable.contains(promise.promise().storeId())) {
+            throw new InvalidPromiseException(Reason.STORE_UNAVAILABLE, "The store stopped taking orders");
+        }
         return promise.promise();
     }
 
@@ -83,5 +98,5 @@ public final class FakePromiseTokenVerifier implements PromiseTokenVerifier {
                 .toList();
     }
 
-    private record Issued(VerifiedPromise promise, List<SkuQuantity> basket) {}
+    private record Issued(VerifiedPromise promise, List<SkuQuantity> basket, GeoPoint deliveryLocation) {}
 }

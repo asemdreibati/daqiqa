@@ -109,7 +109,7 @@ class CheckoutHttpTest extends OrderingIntegrationTest {
 
     /** A request under a promise freshly issued for exactly this basket. */
     private String requestBody(PaymentMethod paymentMethod, SkuQuantity... basket) {
-        String token = promises.issue(STORE, DeliveryTier.EXPRESS_15, 12, List.of(basket));
+        String token = promises.issue(STORE, DeliveryTier.EXPRESS_15, 12, List.of(basket), HOME);
         String items = List.of(basket).stream()
                 .map(line -> "{\"sku\": \"%s\", \"quantity\": %d}".formatted(line.sku(), line.quantity()))
                 .collect(Collectors.joining(", "));

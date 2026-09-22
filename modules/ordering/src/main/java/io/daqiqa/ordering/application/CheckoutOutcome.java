@@ -11,6 +11,8 @@ enum CheckoutOutcome {
     PROMISE_EXPIRED,
     PROMISE_INVALID,
     PROMISE_CART_MISMATCH,
+    PROMISE_LOCATION_MISMATCH,
+    STORE_UNAVAILABLE,
     UNKNOWN_SKU,
     /** Answered with the response stored by an earlier request with the same key. */
     REPLAYED,
@@ -29,6 +31,8 @@ enum CheckoutOutcome {
                 switch (promise.reason()) {
                     case EXPIRED -> PROMISE_EXPIRED;
                     case CART_MISMATCH -> PROMISE_CART_MISMATCH;
+                    case LOCATION_MISMATCH -> PROMISE_LOCATION_MISMATCH;
+                    case STORE_UNAVAILABLE -> STORE_UNAVAILABLE;
                     case MALFORMED, TAMPERED -> PROMISE_INVALID;
                 };
             case CheckoutRejection.UnknownSkus unknown -> UNKNOWN_SKU;
