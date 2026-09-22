@@ -61,10 +61,14 @@ class ServerApiTest {
     void swaggerUiShowsTheContractWeHandWrite() throws IOException {
         String configuration =
                 http.get().uri("/v3/api-docs/swagger-config").retrieve().body(String.class);
-        byte[] served = http.get().uri("/openapi/daqiqa-v1.yaml").retrieve().body(byte[].class);
+        ResponseEntity<byte[]> served =
+                http.get().uri("/openapi/daqiqa-v1.yaml").retrieve().toEntity(byte[].class);
 
         assertThat(JsonPath.<String>read(configuration, "$.url")).isEqualTo("/openapi/daqiqa-v1.yaml");
-        assertThat(served)
+        assertThat(served.getHeaders().getContentType())
+                .as("YAML, not an unnamed download")
+                .isEqualTo(MediaType.parseMediaType("application/yaml"));
+        assertThat(served.getBody())
                 .as("byte for byte the repository's contract, not the document generated from the code")
                 .isEqualTo(Files.readAllBytes(contract()));
     }

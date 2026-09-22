@@ -3,6 +3,9 @@ package io.daqiqa.server;
 import java.time.Clock;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.web.server.MimeMappings;
+import org.springframework.boot.web.server.WebServerFactoryCustomizer;
+import org.springframework.boot.web.server.servlet.ConfigurableServletWebServerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -18,6 +21,19 @@ class ServerConfiguration {
     @Bean
     static DevelopmentKeyGuard developmentKeyGuard(Environment environment) {
         return new DevelopmentKeyGuard(environment);
+    }
+
+    /**
+     * Serves the API contract as YAML, not as an unnamed download: neither Tomcat nor Spring knows the extension, and
+     * {@code /openapi/daqiqa-v1.yaml} would otherwise be {@code application/octet-stream} (RFC 9512).
+     */
+    @Bean
+    WebServerFactoryCustomizer<ConfigurableServletWebServerFactory> yamlMimeType() {
+        return factory -> {
+            MimeMappings mimeMappings = new MimeMappings(MimeMappings.DEFAULT);
+            mimeMappings.add("yaml", "application/yaml");
+            factory.setMimeMappings(mimeMappings);
+        };
     }
 
     /**
