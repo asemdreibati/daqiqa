@@ -9,8 +9,10 @@ import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
 
 /** In-memory catalog. */
 public final class FakeProductCatalog implements ProductCatalog {
@@ -32,13 +34,22 @@ public final class FakeProductCatalog implements ProductCatalog {
             Money.of(9_900, "AED"));
 
     private final Map<Sku, Product> products = new ConcurrentHashMap<>();
+    private final AtomicReference<@Nullable Gate> nextHeld = new AtomicReference<>();
 
     public void add(Product product) {
         products.put(product.sku(), product);
     }
 
+    /** The next {@link #findAll} waits at the returned gate before answering; later ones do not. */
+    public Gate holdNextLookup() {
+        Gate gate = new Gate();
+        nextHeld.set(gate);
+        return gate;
+    }
+
     public void reset() {
         products.clear();
+        nextHeld.set(null);
     }
 
     @Override
@@ -48,6 +59,10 @@ public final class FakeProductCatalog implements ProductCatalog {
 
     @Override
     public Map<Sku, Product> findAll(Collection<Sku> skus) {
+        Gate held = nextHeld.getAndSet(null);
+        if (held != null) {
+            held.arriveAndWait();
+        }
         return skus.stream()
                 .distinct()
                 .map(products::get)
