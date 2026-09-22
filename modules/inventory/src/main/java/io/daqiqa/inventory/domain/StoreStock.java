@@ -38,10 +38,6 @@ public final class StoreStock {
         return new StoreStock(storeId, Map.copyOf(bySku));
     }
 
-    public StoreId storeId() {
-        return storeId;
-    }
-
     /** The level of {@code sku}; zero on hand when the store does not stock it. */
     public StockLevel level(Sku sku) {
         StockLevel level = levels.get(sku);
