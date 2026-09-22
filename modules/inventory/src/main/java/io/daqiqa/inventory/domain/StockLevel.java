@@ -16,7 +16,7 @@ public record StockLevel(StoreId storeId, Sku sku, int onHand, int reserved) {
         Objects.requireNonNull(sku, "sku");
         if (onHand < 0 || reserved < 0 || reserved > onHand) {
             throw new IllegalArgumentException("Stock of " + sku + " at " + storeId
-                    + " must satisfy 0 <= reserved <= on" + " hand, was reserved " + reserved + " of " + onHand);
+                    + " must satisfy 0 <= reserved <= on hand, was reserved " + reserved + " of " + onHand);
         }
     }
 

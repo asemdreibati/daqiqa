@@ -69,8 +69,8 @@ class StockProblemHandler {
     }
 
     /** Unreadable JSON, a wrong type or an unknown enum value. The parser's message would leak internals. */
-    @ExceptionHandler
-    ProblemDetail unreadableBody(HttpMessageNotReadableException e) {
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ProblemDetail unreadableBody() {
         return problem(
                 HttpStatus.BAD_REQUEST,
                 "INVALID_REQUEST",

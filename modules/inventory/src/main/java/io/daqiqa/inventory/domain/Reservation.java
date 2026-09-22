@@ -32,6 +32,7 @@ public record Reservation(
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(storeId, "storeId");
         Objects.requireNonNull(reference, "reference");
+        Objects.requireNonNull(lines, "lines");
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(expiresAt, "expiresAt");
         if (reference.isBlank() || reference.length() > MAX_REFERENCE_LENGTH) {
