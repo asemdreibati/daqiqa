@@ -5,6 +5,7 @@ import io.daqiqa.kernel.PromiseId;
 import io.daqiqa.kernel.StoreId;
 import io.daqiqa.promise.api.DeliveryTier;
 import io.daqiqa.promise.api.VerifiedPromise;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -68,9 +69,12 @@ record TokenClaims(
                     Integer.parseInt(fields[7]),
                     Integer.parseInt(fields[8]));
             claims.location(); // rejects coordinates outside the globe
+            claims.issuedAt(); // and times no clock can show, so later checks can compute with them safely
+            claims.expiresAt();
             return Optional.of(claims);
-        } catch (IllegalArgumentException notAClaim) {
-            // UUID, store id, tier, number and coordinate parsers all report bad input this way.
+        } catch (IllegalArgumentException | DateTimeException notAClaim) {
+            // UUID, store id, tier, number and coordinate parsers report bad input as IllegalArgumentException,
+            // Instant as DateTimeException.
             return Optional.empty();
         }
     }
@@ -80,12 +84,15 @@ record TokenClaims(
         return GeoPoint.of(latitudeE6 / MICRO_DEGREES, longitudeE6 / MICRO_DEGREES);
     }
 
+    Instant issuedAt() {
+        return Instant.ofEpochSecond(issuedAtEpochSecond);
+    }
+
     Instant expiresAt() {
         return Instant.ofEpochSecond(expiresAtEpochSecond);
     }
 
     VerifiedPromise toVerifiedPromise() {
-        return new VerifiedPromise(
-                promiseId, storeId, tier, etaMinutes, Instant.ofEpochSecond(issuedAtEpochSecond), expiresAt());
+        return new VerifiedPromise(promiseId, storeId, tier, etaMinutes, issuedAt(), expiresAt());
     }
 }

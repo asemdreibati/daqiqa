@@ -3,6 +3,7 @@ package io.daqiqa.network.adapter.in.web;
 import io.daqiqa.network.application.StoreNotFoundException;
 import java.net.URI;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import org.springframework.context.MessageSourceResolvable;
@@ -21,8 +22,8 @@ import tools.jackson.core.JacksonException;
 /**
  * Maps network failures to RFC 9457 problem details with a stable, machine-readable {@code code}.
  *
- * <p>Highest precedence, so that for the store endpoints it wins over Spring Boot's generic problem-details handler
- * and validation failures carry this API's codes too.
+ * <p>Highest precedence, so that for the store endpoints it wins over the application-wide handler and validation
+ * failures carry this API's codes too.
  */
 @RestControllerAdvice(basePackageClasses = StoreController.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -82,7 +83,8 @@ class NetworkProblemHandler {
 
     private static ProblemDetail problem(HttpStatus status, String code, String title, String detail) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
-        problem.setType(URI.create("urn:daqiqa:problem:" + code.toLowerCase().replace('_', '-')));
+        problem.setType(
+                URI.create("urn:daqiqa:problem:" + code.toLowerCase(Locale.ROOT).replace('_', '-')));
         problem.setTitle(title);
         problem.setProperty("code", code);
         return problem;

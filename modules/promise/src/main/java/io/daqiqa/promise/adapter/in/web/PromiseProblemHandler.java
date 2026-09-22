@@ -3,6 +3,7 @@ package io.daqiqa.promise.adapter.in.web;
 import io.daqiqa.promise.domain.InvalidBasketException;
 import java.net.URI;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import org.springframework.core.Ordered;
@@ -18,8 +19,8 @@ import tools.jackson.core.JacksonException;
 /**
  * Maps promise request failures to RFC 9457 problem details with a stable, machine-readable {@code code}.
  *
- * <p>Highest precedence, so that for the promise endpoint it wins over Spring Boot's generic problem-details handler
- * and validation failures carry this API's codes too.
+ * <p>Highest precedence, so that for the promise endpoint it wins over the application-wide handler and validation
+ * failures carry this API's codes too.
  */
 @RestControllerAdvice(basePackageClasses = PromiseController.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -67,7 +68,8 @@ class PromiseProblemHandler {
 
     private static ProblemDetail problem(HttpStatus status, String code, String title, String detail) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
-        problem.setType(URI.create("urn:daqiqa:problem:" + code.toLowerCase().replace('_', '-')));
+        problem.setType(
+                URI.create("urn:daqiqa:problem:" + code.toLowerCase(Locale.ROOT).replace('_', '-')));
         problem.setTitle(title);
         problem.setProperty("code", code);
         return problem;

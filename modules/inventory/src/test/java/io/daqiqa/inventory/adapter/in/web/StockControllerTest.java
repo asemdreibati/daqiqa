@@ -21,6 +21,7 @@ import io.daqiqa.kernel.Sku;
 import io.daqiqa.kernel.StoreId;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.assertj.core.api.AssertProvider;
@@ -82,8 +83,9 @@ class StockControllerTest {
         @Test
         void needsAtLeastOneSku() {
             assertProblem(mvc.get().uri("/v1/stores/DXB-MARINA/stock"), HttpStatus.BAD_REQUEST, "VALIDATION_FAILED")
-                    .extractingPath("$.detail")
-                    .isEqualTo("sku: is required");
+                    .extractingPath("$.errors")
+                    .asArray()
+                    .containsExactly(Map.of("field", "sku", "message", "is required"));
         }
 
         @Test
@@ -95,9 +97,8 @@ class StockControllerTest {
                             mvc.get().uri("/v1/stores/DXB-MARINA/stock?" + skus),
                             HttpStatus.BAD_REQUEST,
                             "VALIDATION_FAILED")
-                    .extractingPath("$.detail")
-                    .asString()
-                    .startsWith("sku: ");
+                    .extractingPath("$.errors[0].field")
+                    .isEqualTo("sku");
             verifyNoInteractions(stock);
         }
 
@@ -170,15 +171,17 @@ class StockControllerTest {
         @Test
         void rejectsAZeroMissingOrOutOfRangeDeltaAndAMissingReasonOrSku() {
             assertValidationFailed("""
-                    {"sku": "MILK-FULL-1L", "delta": 0, "reason": "RECEIVED"}""", "delta: must not be zero");
+                    {"sku": "MILK-FULL-1L", "delta": 0, "reason": "RECEIVED"}""", List.of(invalid("delta", "must not be zero")));
             assertValidationFailed("""
-                    {"sku": "MILK-FULL-1L", "reason": "RECEIVED"}""", "delta: must not be null");
+                    {"sku": "MILK-FULL-1L", "reason": "RECEIVED"}""", List.of(invalid("delta", "must not be null")));
             assertValidationFailed("""
-                    {"sku": "MILK-FULL-1L", "delta": 10001, "reason": "RECEIVED"}""", "delta: must be less than or equal to 10000");
+                    {"sku": "MILK-FULL-1L", "delta": 10001, "reason": "RECEIVED"}""", List.of(invalid("delta", "must be less than or equal to 10000")));
             assertValidationFailed("""
-                    {"sku": "MILK-FULL-1L", "delta": -10001, "reason": "RECEIVED"}""", "delta: must be greater than or equal to -10000");
-            assertValidationFailed("""
-                    {"delta": 3}""", "reason: must not be null; sku: must not be null");
+                    {"sku": "MILK-FULL-1L", "delta": -10001, "reason": "RECEIVED"}""", List.of(invalid("delta", "must be greater than or equal to -10000")));
+            // One entry per field, sorted: the same invalid request always gets the same answer.
+            assertValidationFailed(
+                    """
+                    {"delta": 3}""", List.of(invalid("reason", "must not be null"), invalid("sku", "must not be null")));
             verifyNoInteractions(stock);
         }
 
@@ -212,10 +215,15 @@ class StockControllerTest {
                     .exchange();
         }
 
-        private void assertValidationFailed(String json, String detail) {
+        private void assertValidationFailed(String json, List<Map<String, String>> errors) {
             assertProblem(post(json), HttpStatus.BAD_REQUEST, "VALIDATION_FAILED")
-                    .extractingPath("$.detail")
-                    .isEqualTo(detail);
+                    .extractingPath("$.errors")
+                    .asArray()
+                    .containsExactlyElementsOf(errors);
+        }
+
+        private static Map<String, String> invalid(String field, String message) {
+            return Map.of("field", field, "message", message);
         }
     }
 

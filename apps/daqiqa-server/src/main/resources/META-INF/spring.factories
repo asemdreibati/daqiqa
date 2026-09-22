@@ -1,0 +1,3 @@
+# Explains a refusal to start with the published development signing key (DevelopmentKeyGuard).
+org.springframework.boot.diagnostics.FailureAnalyzer=\
+io.daqiqa.server.DevelopmentKeyGuard$Analyzer

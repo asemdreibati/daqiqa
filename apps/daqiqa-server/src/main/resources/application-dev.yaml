@@ -1,0 +1,22 @@
+# The dev profile: local runs (`./gradlew :apps:daqiqa-server:bootRun` activates it) and the server's own tests.
+# It signs promises with a key published in this repository, so never activate it on an instance others can reach.
+# Events still go to Kafka by default, so none is dropped silently: DAQIQA_EVENT_PUBLISHER=logging runs without one.
+
+spring:
+  flyway:
+    # The modules' schema plus the Dubai demo stores, products and stock (major 9, see docs/engineering/conventions.md).
+    locations: ${DAQIQA_FLYWAY_LOCATIONS:classpath:db/migration,classpath:db/demo}
+
+daqiqa:
+  promise:
+    token:
+      # The published development key: anyone can sign promise tokens with it. The server refuses to start with it,
+      # under any key id, unless this profile is active (DevelopmentKeyGuard), and warns at startup when it is.
+      active-key-id: ${DAQIQA_PROMISE_TOKEN_KEY_ID:dev}
+      keys:
+        dev: ZGFxaXFhLWRldi1vbmx5LXByb21pc2Utc2lnbmluZy1rZXkh
+
+logging:
+  level:
+    # Without a broker the Kafka client logs every reconnection attempt; the outbox relay reports failed sends itself.
+    org.apache.kafka.clients.NetworkClient: ERROR

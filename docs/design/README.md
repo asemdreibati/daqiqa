@@ -8,6 +8,6 @@ that prove each guarantee. The wave 1 notes were revised after independent revie
 | Module | Note | Owner (wave 1) | Status | Tests |
 |---|---|---|---|---|
 | inventory | [inventory.md](inventory.md) | inventory engineer | Built, reviewed | 138 |
-| network + promise | [promise.md](promise.md) | promise engineer | Built, reviewed | 89 + 143 |
+| network + promise | [promise.md](promise.md) | promise engineer | Built, reviewed | 89 + 148 |
 | ordering + messaging | [ordering.md](ordering.md) | ordering engineer | Built, reviewed | 126 + 32 |
 | catalog | [catalog.md](catalog.md) | architect (reference module) | Built | 10 |

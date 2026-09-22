@@ -144,18 +144,24 @@ class OrderControllerTest {
         MvcTestResult result = placeOrder("short", VALID);
 
         assertProblem(result, HttpStatus.BAD_REQUEST, "VALIDATION_FAILED");
-        assertThat(result).bodyJson().extractingPath("$.detail").asString().startsWith("Idempotency-Key: ");
+        assertThat(result).bodyJson().extractingPath("$.errors[0].field").isEqualTo(OrderController.IDEMPOTENCY_KEY);
         then(checkout).shouldHaveNoInteractions();
     }
 
     @ParameterizedTest(name = "{0}")
-    @MethodSource("invalidRequests")
-    void refusesAnInvalidRequestBeforeClaimingTheKey(String problem, String body) {
+    @MethodSource("invalidFields")
+    void refusesARequestWithInvalidFieldsBeforeClaimingTheKey(String problem, String body) {
         assertProblem(placeOrder(KEY, body), HttpStatus.BAD_REQUEST, "VALIDATION_FAILED");
+        assertThat(placeOrder(KEY, body))
+                .bodyJson()
+                .extractingPath("$.errors")
+                .asArray()
+                .as("every VALIDATION_FAILED problem names the fields at fault")
+                .isNotEmpty();
         then(checkout).shouldHaveNoInteractions();
     }
 
-    static Stream<Arguments> invalidRequests() {
+    static Stream<Arguments> invalidFields() {
         String items51 = IntStream.rangeClosed(1, 51)
                 .mapToObj(i -> "{\"sku\": \"SKU-" + i + "\", \"quantity\": 1}")
                 .collect(Collectors.joining(","));
@@ -167,7 +173,19 @@ class OrderControllerTest {
                 Arguments.of("51 lines", VALID.replaceAll("\\[.*]", "[" + items51 + "]")),
                 Arguments.of("latitude out of range", VALID.replace("25.0772", "91")),
                 Arguments.of("blank promise token", VALID.replace("v1.k1.payload.signature", " ")),
-                Arguments.of("missing payment method", VALID.replace(", \"paymentMethod\": \"CARD\"", "")),
+                Arguments.of("missing payment method", VALID.replace(", \"paymentMethod\": \"CARD\"", "")));
+    }
+
+    /** A body we cannot even read as a request: no field is at fault, the request is. */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("unreadableRequests")
+    void refusesARequestItCannotReadBeforeClaimingTheKey(String problem, String body) {
+        assertProblem(placeOrder(KEY, body), HttpStatus.BAD_REQUEST, "INVALID_REQUEST");
+        then(checkout).shouldHaveNoInteractions();
+    }
+
+    static Stream<Arguments> unreadableRequests() {
+        return Stream.of(
                 Arguments.of("unknown payment method", VALID.replace("\"CARD\"", "\"BITCOIN\"")),
                 Arguments.of("customer id not a UUID", VALID.replace(CUSTOMER, "customer-42")),
                 Arguments.of("not JSON", "{\"promiseToken\": "),
@@ -182,9 +200,12 @@ class OrderControllerTest {
 
         assertThat(placeOrder(KEY, body))
                 .bodyJson()
-                .extractingPath("$.detail")
-                .isEqualTo("deliveryLocation.latitude: must be less than or equal to 90; "
-                        + "items[0].quantity: must be greater than or equal to 1");
+                .extractingPath("$.errors")
+                .asArray()
+                .as("one entry per field, sorted")
+                .containsExactly(
+                        Map.of("field", "deliveryLocation.latitude", "message", "must be less than or equal to 90"),
+                        Map.of("field", "items[0].quantity", "message", "must be greater than or equal to 1"));
     }
 
     @Test
@@ -245,7 +266,7 @@ class OrderControllerTest {
 
     @Test
     void refusesAMalformedOrderId() {
-        assertProblem(mvc.get().uri("/v1/orders/not-a-uuid").exchange(), HttpStatus.BAD_REQUEST, "VALIDATION_FAILED");
+        assertProblem(mvc.get().uri("/v1/orders/not-a-uuid").exchange(), HttpStatus.BAD_REQUEST, "INVALID_REQUEST");
     }
 
     private MvcTestResult placeOrder(String idempotencyKey, String body) {

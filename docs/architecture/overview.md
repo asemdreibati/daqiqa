@@ -522,10 +522,12 @@ flowchart TB
   `SKIP LOCKED` spreads the sweeps, the advisory lock picks one relay per round.
 - **Configuration comes from the environment**: `DAQIQA_DB_URL`, `DAQIQA_DB_USER`, `DAQIQA_DB_PASSWORD`,
   `DAQIQA_DB_POOL_SIZE`, `DAQIQA_KAFKA_BOOTSTRAP_SERVERS`, `DAQIQA_EVENT_PUBLISHER` (`kafka` by default),
-  `DAQIQA_FLYWAY_LOCATIONS` (drop `classpath:db/demo` outside demos) and `DAQIQA_LOG_FORMAT=ecs` for JSON logs.
+  `DAQIQA_FLYWAY_LOCATIONS` and `DAQIQA_LOG_FORMAT=ecs` for JSON logs.
 - **Signing keys come from a secret store** as `daqiqa.promise.token.keys.<id>`, with `active-key-id` naming the one
-  that signs. The server ships a development key (`DAQIQA_PROMISE_TOKEN_KEY_ID`, `DAQIQA_PROMISE_TOKEN_DEV_KEY`) and
-  logs a warning at startup while it is active.
+  that signs; without an active key the server does not start. The published development key lives in the `dev`
+  profile (`application-dev.yaml`, which `bootRun` activates) and nowhere else: configured under any id while that
+  profile is inactive, it stops the server at startup (`DevelopmentKeyGuard`). The demo data (`classpath:db/demo`) is
+  part of the same profile.
 - **Every connection sets `lock_timeout = '3s'`**, so a request never waits longer than that for a row lock; the jobs
   use `SKIP LOCKED` and try-locks and never wait at all.
 - **Rolling restarts are safe.** `server.shutdown=graceful` finishes in-flight requests; liveness and readiness

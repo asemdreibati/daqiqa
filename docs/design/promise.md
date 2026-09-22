@@ -87,9 +87,11 @@ the ETA", "suggestions never contain SKUs that are in stock at that store").
   `daqiqa.promise.token.validity` (default 90 s), `daqiqa.promise.token.location-tolerance` (metres, default 100). Fail
   fast at startup if the active key is missing or too short.
 - Verification (`PromiseTokenVerifier.verify(token, lines, deliveryLocation)`): format → `MALFORMED`; unknown kid →
-  `MALFORMED`; signature mismatch (constant-time `MessageDigest.isEqual`) → `TAMPERED`; `now ≥ expiresAt` →
+  `MALFORMED`; signature mismatch (constant-time `MessageDigest.isEqual`) → `TAMPERED`; claims we never issue (valid
+  for longer than the validity, or issued more than 30 s in the future) → `MALFORMED`; `now ≥ expiresAt` →
   `EXPIRED`; basket hash differs → `CART_MISMATCH`; delivery location farther than the tolerance from the promised one
-  → `LOCATION_MISMATCH`; promised store no longer accepts orders → `STORE_UNAVAILABLE`.
+  → `LOCATION_MISMATCH`; promised store no longer accepts orders → `STORE_UNAVAILABLE`. *(Issuance checks amended
+  after the principal review.)*
 
 ### HTTP
 
@@ -205,16 +207,31 @@ the earlier layout.
 `CheckoutPromiseVerifier`, the `PromiseTokenVerifier` bean, checks in this order:
 
 1. format and key id (`MALFORMED`), then signature (`TAMPERED`);
-2. expiry (`EXPIRED`, `now ≥ expiresAt`);
-3. basket (`CART_MISMATCH`; this also covers an empty or otherwise impossible basket);
-4. location (`LOCATION_MISMATCH` when the delivery point is farther than `location-tolerance` from the promised one,
+2. claims we issue (`MALFORMED` when the token is valid for longer than `validity`, or expires no later than it is
+   issued, or was issued more than 30 s ahead of the injected clock);
+3. expiry (`EXPIRED`, `now ≥ expiresAt`);
+4. basket (`CART_MISMATCH`; this also covers an empty or otherwise impossible basket);
+5. location (`LOCATION_MISMATCH` when the delivery point is farther than `location-tolerance` from the promised one,
    default 100 m: enough for geocoding and GPS noise, not for a change of address);
-5. store status (`STORE_UNAVAILABLE` when the network's in-memory view says the store no longer accepts orders; `BUSY`
+6. store status (`STORE_UNAVAILABLE` when the network's in-memory view says the store no longer accepts orders; `BUSY`
    still does).
 
 The status check is immediate for changes made through this instance and up to the refresh interval (30 s by default)
 late for changes made through another. Exception messages give distances, never coordinates, because they end up in
 logs.
+
+**Claims we never issue are refused (added after the principal review).** A valid signature proves that a key we trust
+signed the token, not that we issued it: whoever holds a key can sign any claims. The server's default configuration
+used to carry the published development key, and the reviewer signed a one-minute ETA valid for 24 hours with it;
+checkout accepted it. Besides removing that key from every configuration but the `dev` profile (the server now refuses
+to start with it otherwise), the verifier refuses, as `MALFORMED` ("not a token we issued"), any token whose lifetime
+(`expiresAt − issuedAt`) is not between 1 s and the configured validity, and any token issued more than 30 s after
+now on the injected clock. Every token we issue is valid for exactly the validity from its issue time, and the
+instances' clocks agree far more closely than 30 s, so no genuine token is refused; a forged one can no longer outlive
+the validity window, nor be dated into the future to stretch it. These checks run right after the signature, before
+expiry, so a forgery is reported as one even when it has also expired. Issue and expiry times outside `Instant`'s range
+fail to decode (`MALFORMED`) instead of escaping as an exception. Lowering `validity` makes tokens issued under the old
+value fail during the rollout (for at most one old validity window); raising it does not.
 
 **Validation.** Store endpoints validate the path id against the contract's pattern; Spring then validates the whole
 method, so body errors on `PUT .../status` are reported the same way (`VALIDATION_FAILED`, 400). Validation problems
@@ -244,9 +261,10 @@ domain invariant.
 | `daqiqa.promise.token.validity` | `90s` | how long a promise can be turned into an order (1 s to 1 h) |
 | `daqiqa.promise.token.location-tolerance` | `100` | metres the delivery point may be from the promised one (positive) |
 
-This module ships no signing key. The server application must configure `daqiqa.promise.token.*`; the architect is
-adding a dev key, overridable by environment variables, at integration. Without a key the application refuses to
-start: *Failed to bind properties under 'daqiqa.promise' … No promise token signing key is configured: set
+This module ships no signing key, and neither does the server's default configuration: keys come from the
+deployment's secret store as `daqiqa.promise.token.keys.<id>` (`DAQIQA_PROMISE_TOKEN_KEYS_<ID>`). The published
+development key is in the server's `dev` profile alone, and the server refuses to start with it under any id while
+that profile is inactive (`DevelopmentKeyGuard`). Without a key the application refuses to start: *Failed to bind properties under 'daqiqa.promise' … No promise token signing key is configured: set
 daqiqa.promise.token.active-key-id=&lt;id&gt; and daqiqa.promise.token.keys.&lt;id&gt;=&lt;base64 key of at least 32
 bytes&gt;*. Rotation: add the new key everywhere, make it active, remove the old one once its tokens have expired.
 
@@ -274,7 +292,7 @@ bytes&gt;*. Rotation: add the new key everywhere, make it active, remove the old
 | Every calculator branch with worked numbers, including the review's milk-and-water case | `PromiseCalculatorTest` (24 cases) |
 | Chosen store can supply the basket; none faster to the second could; ETA = breakdown rounded up, in its tier; a suggestion drops exactly what its store lacks and never everything; promising the rest gives exactly the suggestion; at most two, fastest first, faster than the offer; order of candidates irrelevant; right unavailable reason; more travel never makes a promise sooner | `PromiseCalculatorPropertiesTest` (jqwik, 1,000 scenarios each, big baskets included; statistics coverage checks fail the build if the generator stops producing an outcome, capped picks or pick-dominated ETAs) |
 | Token format (checked against an independent HMAC implementation), tampering, other secret, unknown kid, malformed input, rotation | `PromiseTokenCodecTest`, `SigningKeysTest`, `BasketHashTest` |
-| Expiry boundary, cart mismatch including merged duplicates, location tolerance at ±1 cm of the boundary, store paused, closed or unknown, busy accepted, check order | `CheckoutPromiseVerifierTest` |
+| Expiry boundary, cart mismatch including merged duplicates, location tolerance at ±1 cm of the boundary, store paused, closed or unknown, busy accepted, check order; correctly signed tokens we never issue (valid a day, a second longer than the validity, expiring before issue, issued 31 s ahead) refused, one second inside each limit accepted | `CheckoutPromiseVerifierTest` |
 | The location round-trips to within 11 cm anywhere on Earth; random or mutated tokens only ever fail as `MALFORMED` or `TAMPERED` | `PromiseTokenLocationTest`, `PromiseTokenFuzzTest` (jqwik) |
 | One availability round trip for all candidates and SKUs, none without candidates; busy stores; merged duplicates; metrics | `PromiseServiceTest` (fakes for coverage, stock and the directory) |
 | Fail fast on a missing, short, non-base64 or unconfigured key and a non-positive tolerance; defaults; overrides | `PromiseConfigurationTest` |
@@ -282,7 +300,7 @@ bytes&gt;*. Rotation: add the new key everywhere, make it active, remove the old
 | A promise made over HTTP is honoured by the `PromiseTokenVerifier` bean checkout uses | `PromiseModuleTest` |
 | Layering | `ArchitectureTest` in both modules |
 
-Totals: network 89 tests (6 properties), promise 143 tests (13 properties), all green.
+Totals: network 89 tests (6 properties), promise 148 tests (13 properties), all green.
 
 ### Next steps
 

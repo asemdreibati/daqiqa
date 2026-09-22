@@ -10,16 +10,20 @@ spring:
     password: ${DAQIQA_DB_PASSWORD:daqiqa}
     hikari:
       maximum-pool-size: ${DAQIQA_DB_POOL_SIZE:20}
+      # An exhausted pool answers 503 TEMPORARILY_UNAVAILABLE within 2 s (GlobalProblemHandler) instead of holding
+      # the request for Hikari's default 30 s. Milliseconds.
+      connection-timeout: 2000
       # Bound every lock wait. A checkout stuck behind a hot stock row fails fast (the client retries with its
       # idempotency key) instead of piling up connections. Scheduled jobs use SKIP LOCKED or try-locks and never wait.
       connection-init-sql: "SET lock_timeout = '3s'"
   flyway:
-    # db/migration: schema owned by each module. db/demo: Dubai demo data (drop it in real deployments).
-    locations: ${DAQIQA_FLYWAY_LOCATIONS:classpath:db/migration,classpath:db/demo}
+    # db/migration: the schema, owned by each module. The Dubai demo data (db/demo) comes with the dev profile only.
+    locations: ${DAQIQA_FLYWAY_LOCATIONS:classpath:db/migration}
     out-of-order: true # modules own disjoint major versions; see docs/engineering/conventions.md
   mvc:
     problemdetails:
-      enabled: true # RFC 9457 responses for framework errors too
+      # RFC 9457 for framework errors too. GlobalProblemHandler replaces Boot's handler and adds the house format.
+      enabled: true
   kafka:
     bootstrap-servers: ${DAQIQA_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -40,11 +44,11 @@ daqiqa:
     publisher: ${DAQIQA_EVENT_PUBLISHER:kafka}
   promise:
     token:
-      # Development key only. Real deployments mount their keys as daqiqa.promise.token.keys.<kid> from a secret store
-      # and set active-key-id; the server logs a warning while the development key is active.
-      active-key-id: ${DAQIQA_PROMISE_TOKEN_KEY_ID:dev}
-      keys:
-        dev: ${DAQIQA_PROMISE_TOKEN_DEV_KEY:ZGFxaXFhLWRldi1vbmx5LXByb21pc2Utc2lnbmluZy1rZXkh}
+      # No signing key ships with the server, and it does not start without one. Mount keys from a secret store as
+      # daqiqa.promise.token.keys.<id> (for example DAQIQA_PROMISE_TOKEN_KEYS_K1=$(openssl rand -base64 32)) and name
+      # the one that signs here. The published development key is in application-dev.yaml; the server refuses to start
+      # with it unless the dev profile is active.
+      active-key-id: ${DAQIQA_PROMISE_TOKEN_KEY_ID:}
 
 server:
   shutdown: graceful
@@ -65,6 +69,9 @@ management:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+    # The hand-written contract (api/openapi, copied into the jar by processResources), not the document springdoc
+    # derives from the code; that one stays at /v3/api-docs.
+    url: /openapi/daqiqa-v1.yaml
 
 logging:
   structured:

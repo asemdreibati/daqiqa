@@ -4,6 +4,7 @@ import io.daqiqa.inventory.api.Shortage;
 import io.daqiqa.kernel.Sku;
 import io.daqiqa.ordering.application.CheckoutRejection;
 import java.net.URI;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.stream.Collectors;
@@ -27,9 +28,25 @@ final class Problems {
         return problem;
     }
 
-    static ProblemDetail validationFailed(String detail) {
-        return of(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Validation failed", detail);
+    /** Every field the request got wrong, sorted, so the same invalid request always gets the same answer. */
+    static ProblemDetail validationFailed(List<InvalidField> errors) {
+        ProblemDetail problem =
+                of(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Validation failed", "The request has invalid fields");
+        problem.setProperty(
+                "errors",
+                errors.stream()
+                        .sorted(Comparator.comparing(InvalidField::field).thenComparing(InvalidField::message))
+                        .toList());
+        return problem;
     }
+
+    /** A request we cannot even read as the operation's input: malformed JSON, a value of the wrong kind. */
+    static ProblemDetail invalidRequest(String detail) {
+        return of(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Invalid request", detail);
+    }
+
+    /** One entry of a {@code VALIDATION_FAILED} problem's {@code errors}, as the contract defines it. */
+    record InvalidField(String field, String message) {}
 
     /** The problem a checkout ends with when it ends without an order. */
     static ProblemDetail rejected(CheckoutRejection rejection) {

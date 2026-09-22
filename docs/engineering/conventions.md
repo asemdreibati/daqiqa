@@ -89,12 +89,41 @@ package-private.
 - Contract first: `api/openapi/daqiqa-v1.yaml`. Implementations follow it; changes to it are reviewed.
 - Paths `/v1/...`, JSON `camelCase`, enums as `UPPER_SNAKE` strings.
 - Errors: RFC 9457 `ProblemDetail` with `type = urn:daqiqa:problem:<code-in-kebab-case>` and a stable
-  `code` property (`OUT_OF_STOCK`). Each module maps its own exceptions in a `@RestControllerAdvice` scoped to its
-  web package.
+  `code` property (`OUT_OF_STOCK`); see [Errors](#errors) below.
 - Status codes: 400 malformed/invalid input, 404 unknown resource, 409 conflict with current state, 422 well-formed
   but violates a business rule, 402 payment declined.
 - Creating business facts (`POST /v1/orders`) requires `Idempotency-Key` (ADR-0008).
 - Unbounded lists use keyset pagination (`cursor`, `limit`), never `OFFSET`.
+
+### Errors
+
+Every failure leaves the server as a problem detail with a `code` a client can switch on, and a `type` derived from it
+(`code.toLowerCase(Locale.ROOT).replace('_', '-')`, never the default locale: a Turkish JVM writes a different `I`).
+Two layers produce them:
+
+- **each module's `@RestControllerAdvice`**, scoped with `basePackageClasses` to its own web package and
+  `@Order(Ordered.HIGHEST_PRECEDENCE)`, maps what its endpoints can fail with (`OUT_OF_STOCK`, `STORE_NOT_FOUND`, …);
+- **the server's `GlobalProblemHandler`** (`apps/daqiqa-server`, lowest precedence) answers everything they leave. It
+  extends `ResponseEntityExceptionHandler`, which replaces Spring Boot's default problem handler, so Spring MVC's own
+  errors get the house format too.
+
+| Code | Status | When |
+|---|---|---|
+| `VALIDATION_FAILED` | 400 | The request was read, but a field is invalid. Always carries `errors: [{field, message}]`, sorted, one entry per field |
+| `INVALID_REQUEST` | 400 | The request could not be read as the operation's input at all: malformed JSON, an unknown enum value, an identifier of the wrong shape |
+| `NOT_FOUND` | 404 | Nothing is served at that path. A resource that does not exist has the module's own code (`ORDER_NOT_FOUND`) |
+| `METHOD_NOT_ALLOWED` / `NOT_ACCEPTABLE` / `UNSUPPORTED_MEDIA_TYPE` | 405 / 406 / 415 | Framework errors, in the house format |
+| `TEMPORARILY_UNAVAILABLE` | 503 | The database could not answer now: lock timeout (`55P03`), deadlock (`40P01`), serialization failure (`40001`), or no connection. Carries `Retry-After: 1`, and retrying is safe |
+| `INTERNAL_ERROR` | 500 | Anything unexpected. A generic detail and an `incidentId`; the exception is logged under that id and never sent |
+
+Rules of thumb:
+
+- a request that breaks a business rule gets the module's own code (422, 409, 402), never `INTERNAL_ERROR`;
+- never put an exception message from below the adapter in a response: it names internals. Problems the client can
+  act on say what to do instead;
+- fail-fast paths must reach the client as 503, not as a 500 or a hang: every lock wait ends after 3 s
+  (`lock_timeout`) and waiting for a connection after 2 s (`spring.datasource.hikari.connection-timeout`);
+- a new code goes into `api/openapi/daqiqa-v1.yaml` in the same change.
 
 ## Events
 
