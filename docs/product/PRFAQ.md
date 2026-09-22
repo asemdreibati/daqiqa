@@ -159,10 +159,10 @@ measurement says so; rider-location ingestion in wave 2 is the likely first
 
 Coverage ("which stores can serve this point?") is on the hot path of every promise, so it must be answered from
 memory in constant time. H3 at resolution 9 tiles the city with hexagons of about 0.1 km². Each store's service area
-is precomputed as a set of cells (about 270 for a 3 km radius), and an immutable map from cell to stores answers the
-question with one hash lookup and no lock. A hundred stores with 3 km radii make about 27,000 cells: a few megabytes.
-Exact distances are then computed for the few candidates only, so no point outside a store's radius is ever served.
-Hexagons have uniform neighbour distances, which also suits the demand and rider heatmaps planned later. PostGIS
+is precomputed as the cells within its radius plus one cell's circumradius: 358 cells for a 3 km store, measured in
+Dubai. An immutable map from cell to stores answers the question with one lookup and no lock. The margin means no
+customer inside a radius is missed; exact distances, computed for the few candidates only, mean no point outside it
+is ever served. Hexagons have uniform neighbour distances, which also suits the demand and rider heatmaps planned later. PostGIS
 would put a database round trip on the hot path; geohash cells are rectangles with uneven neighbours; per-store
 polygons are a future extension that H3 absorbs, because cells can be generated from polygons
 ([ADR-0006](../adr/0006-h3-for-coverage.md)).
@@ -171,12 +171,16 @@ polygons are a future extension that H3 absorbs, because cells can be generated 
 
 Most promises are never ordered. At the capacity model's assumption of 20 promise requests per order, storing them
 would add 20 writes per order to the hottest path, plus a lookup at checkout. Instead, each offer carries a compact
-token signed with HMAC-SHA256: promise id, store, tier, ETA, issue and expiry times, and a SHA-256 hash of the basket.
-Checkout verifies it without I/O: the signature (compared in constant time), the expiry (90 s, against the injected
-clock) and the basket hash. Changing the ETA breaks the signature; reusing the token for another basket fails the
-hash. Tokens name their signing key (`kid`), so keys rotate without downtime. The trade-off is that a single token
-cannot be revoked, which a 90-second validity makes acceptable. A small format that is fully under test was preferred
-to a JWT library and its algorithm-negotiation pitfalls ([ADR-0007](../adr/0007-signed-promise-tokens.md)).
+token signed with HMAC-SHA256: promise id, store, tier, ETA, issue and expiry times, a SHA-256 hash of the basket, and
+the location the promise was computed for. Checkout verifies it without I/O: the signature (compared in constant
+time), the expiry (90 s, against the injected clock), the basket hash, a delivery point within 100 m of the promised
+location, and, from the in-memory network view, a store that still accepts orders. Changing the ETA breaks the
+signature; reusing the token for another basket or another address fails its check. Tokens name their signing key
+(`kid`), so keys rotate without downtime. The trade-off is that a single token cannot be revoked: within its 90
+seconds it verifies wherever it is presented. Two rules bound that. A paused store's tokens are refused. And a promise
+converts to at most one live order: a partial unique index guarantees it, and a per-promise lock makes a racing second
+checkout hear `PROMISE_ALREADY_USED`. A small format that is fully under test was preferred to a JWT library and its
+algorithm-negotiation pitfalls ([ADR-0007](../adr/0007-signed-promise-tokens.md)).
 
 ### 6. How are retries made safe?
 
@@ -257,7 +261,8 @@ tests and chaos drills that measure them are wave 3.
 - Scheduled delivery slots, substitutions, promotions, returns and refunds.
 - Order cancellation: the contract lists a `CANCELLED` status, but no cancellation flow is specified yet.
 - Traffic-aware travel times and polygon delivery zones.
-- Sharing store status changes between replicas (the planned `StoreStatusChanged` event).
+- Instant store-status propagation between replicas: a change reaches other replicas within 30 s today, and the
+  planned `StoreStatusChangedV1` event makes it immediate.
 - Fulfilment, dispatch, tracking, search and the ops console, which are waves 2 to 4.
 
 ### 12. What are the biggest risks, and how are they mitigated?
@@ -267,7 +272,7 @@ tests and chaos drills that measure them are wave 3.
 | The v1 ETA model is simple: straight-line distance, fixed speeds, fixed waits | Late deliveries break the promise, and the promise is the product | A safety buffer now; per-store calibration from the accuracy loop (wave 3); a breakdown that shows which component was wrong |
 | Promises read availability without locks | A shopper can be promised an item that sells out before checkout | Checkout re-checks under lock and answers `409 OUT_OF_STOCK` naming what is missing; the rate is a metric (`daqiqa.ordering.checkouts` with `outcome=out_of_stock`) |
 | A flash sale concentrates demand on one SKU | Reservations for that SKU queue on one row | Locks are held only for a short transaction (at an assumed 5 ms, 200 reservations per second per row); a Redis pre-reservation layer in front of the same guarantee is the next step |
-| One failing event blocks the outbox | The relay stops at the first failed send, so one bad event delays all later ones | `attempts` and `last_error` per row and the backlog gauge make it visible within seconds; per-key blocking or a dead-letter policy if it happens in practice |
-| Store status is not yet shared between replicas | A paused store keeps receiving promises on other replicas | The planned `StoreStatusChanged` event, required before promises are served by more than one replica |
+| One failing event blocks the outbox | The relay stops at the first failed send, so one bad event delays all later ones | The event backs off (1 s doubling to 5 min) with throttled logs; `attempts`, `last_error`, the failures counter and the backlog gauge make it visible within seconds; parking an event is the next step if it happens in practice |
+| Store status reaches other replicas only at their next 30 s refresh | A paused store can keep receiving promises, and honouring its tokens, on other replicas for up to 30 s | The planned `StoreStatusChangedV1` event |
 | PostgreSQL is on every request path | Its outage is an outage | A managed, highly available PostgreSQL in the production deployment (wave 4). Kafka is already off the request path |
 | Many modules built in parallel by a small team | Boundaries erode and migrations collide | Contracts first, ArchUnit rules, one schema and one Flyway major version per module, CI on every change |
