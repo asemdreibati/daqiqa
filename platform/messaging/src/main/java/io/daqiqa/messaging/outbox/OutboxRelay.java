@@ -113,7 +113,8 @@ class OutboxRelay {
         repository.recordFailure(event, String.valueOf(failure), nextAttempt);
         counter("daqiqa.outbox.failures", event).increment();
         // A poison event fails on every attempt until someone fixes it. Its 1st, 2nd, 4th, 8th... failures are logged
-        // at WARN, which with the doubling backoff is a handful of lines an hour; the others at DEBUG.
+        // at WARN, the others at DEBUG: with the default backoff, five WARN lines in the first hour, then one after
+        // about 2, 5 and 10 hours, and so on.
         if (Integer.bitCount(attempts) == 1) {
             log.warn(
                     "Could not publish outbox event {} ({}), attempt {}; nothing after it is published until it is. "
