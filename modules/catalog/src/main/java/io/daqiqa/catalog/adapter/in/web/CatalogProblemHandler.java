@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * Maps catalog failures to RFC 9457 problem details with a stable, machine-readable {@code code}.
  *
  * <p>Ordered first, like every module's handler, so that it answers for these controllers before the
- * application-wide handler, which takes anything left as an internal error.
+ * application-wide handler, which answers only what the modules leave.
  */
 @RestControllerAdvice(basePackageClasses = ProductController.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)

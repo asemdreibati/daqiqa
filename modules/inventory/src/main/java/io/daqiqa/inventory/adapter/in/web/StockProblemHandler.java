@@ -25,8 +25,8 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 /**
  * Maps stock endpoint failures to RFC 9457 problem details with a stable, machine-readable {@code code}.
  *
- * <p>Ordered first so that, for these controllers, it wins over the application-wide problem-details handler (which
- * would answer validation failures without a {@code code}).
+ * <p>Ordered first so that, for these controllers, it wins over the application-wide handler, which answers only
+ * what the modules leave.
  */
 @RestControllerAdvice(basePackageClasses = StockController.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)

@@ -19,8 +19,8 @@ import tools.jackson.core.JacksonException;
 /**
  * Maps promise request failures to RFC 9457 problem details with a stable, machine-readable {@code code}.
  *
- * <p>Highest precedence, so that for the promise endpoint it wins over Spring Boot's generic problem-details handler
- * and validation failures carry this API's codes too.
+ * <p>Highest precedence, so that for the promise endpoint it wins over the application-wide handler and validation
+ * failures carry this API's codes too.
  */
 @RestControllerAdvice(basePackageClasses = PromiseController.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)
