@@ -7,6 +7,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
@@ -28,7 +29,7 @@ class OutboxRepository {
      */
 
     static final String LOCK_NEXT_BATCH = """
-            SELECT id, seq, type, topic, partition_key, payload, occurred_at, attempts
+            SELECT id, seq, type, topic, partition_key, payload, occurred_at, attempts, next_attempt_at
             FROM messaging.outbox_event
             WHERE published_at IS NULL
             ORDER BY seq
@@ -104,12 +105,13 @@ class OutboxRepository {
                 .update();
     }
 
-    void recordFailure(PendingEvent event, String error) {
+    void recordFailure(PendingEvent event, String error, Instant nextAttemptAt) {
         jdbc.sql("""
                         UPDATE messaging.outbox_event
-                        SET attempts = attempts + 1, last_error = :error
+                        SET attempts = attempts + 1, last_error = :error, next_attempt_at = :nextAttemptAt
                         WHERE id = :id""")
                 .param("id", event.id())
+                .param("nextAttemptAt", utc(nextAttemptAt))
                 .param("error", error.length() <= MAX_ERROR_LENGTH ? error : error.substring(0, MAX_ERROR_LENGTH))
                 .update();
     }
@@ -142,7 +144,12 @@ class OutboxRepository {
                 rs.getString("partition_key"),
                 rs.getString("payload"),
                 rs.getObject("occurred_at", OffsetDateTime.class).toInstant(),
-                rs.getInt("attempts"));
+                rs.getInt("attempts"),
+                instantOrNull(rs.getObject("next_attempt_at", OffsetDateTime.class)));
+    }
+
+    private static @Nullable Instant instantOrNull(@Nullable OffsetDateTime timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
     }
 
     private static OffsetDateTime utc(Instant instant) {

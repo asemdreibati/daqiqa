@@ -53,9 +53,13 @@ final class OutboxFixtures {
     }
 
     static MessagingProperties properties(int relayBatchSize, int purgeBatchSize) {
+        return properties(relayBatchSize, purgeBatchSize, Duration.ofMinutes(5));
+    }
+
+    static MessagingProperties properties(int relayBatchSize, int purgeBatchSize, Duration maxBackoff) {
         return new MessagingProperties(
                 Publisher.LOGGING,
-                new Relay(Duration.ofMillis(250), relayBatchSize),
+                new Relay(Duration.ofMillis(250), relayBatchSize, Duration.ofSeconds(1), maxBackoff),
                 Duration.ofDays(7),
                 new Purge(Duration.ofHours(1), purgeBatchSize),
                 new Kafka(Duration.ofSeconds(10)));

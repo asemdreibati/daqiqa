@@ -58,7 +58,7 @@ class PublisherSelectionTest {
         contexts.run(context -> assertThat(context.getBean(MessagingProperties.class))
                 .isEqualTo(new MessagingProperties(
                         Publisher.LOGGING,
-                        new Relay(Duration.ofMillis(250), 100),
+                        new Relay(Duration.ofMillis(250), 100, Duration.ofSeconds(1), Duration.ofMinutes(5)),
                         Duration.ofDays(7),
                         new Purge(Duration.ofHours(1), 1000),
                         new Kafka(Duration.ofSeconds(10)))));

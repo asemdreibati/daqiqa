@@ -3,6 +3,7 @@ package io.daqiqa.messaging.outbox;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A committed outbox row that has not been published yet, exactly as the relay hands it to an {@link EventPublisher}.
@@ -15,6 +16,7 @@ import java.util.UUID;
  * @param payload the event serialised as a JSON object
  * @param occurredAt when the fact happened in the business domain
  * @param attempts failed publication attempts so far
+ * @param nextAttemptAt after a failure, the earliest time the relay may try again; {@code null} if it never failed
  */
 public record PendingEvent(
         UUID id,
@@ -24,7 +26,8 @@ public record PendingEvent(
         String partitionKey,
         String payload,
         Instant occurredAt,
-        int attempts) {
+        int attempts,
+        @Nullable Instant nextAttemptAt) {
 
     public PendingEvent {
         Objects.requireNonNull(id, "id");

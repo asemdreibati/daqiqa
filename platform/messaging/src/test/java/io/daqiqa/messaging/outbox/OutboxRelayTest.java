@@ -12,7 +12,11 @@ import io.daqiqa.messaging.outbox.RecordingPublisher.SimulatedCrash;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -104,8 +108,56 @@ class OutboxRelayTest {
                 .isZero();
 
         publisher.heal();
-        assertThat(relay.relay()).isEqualTo(new RelayRound(true, 2, false));
+        assertThat(relayAt(NOW.plusSeconds(1)).relay()).isEqualTo(new RelayRound(true, 2, false));
         assertThat(publisher.published()).containsExactlyElementsOf(ids(events));
+    }
+
+    @Test
+    void waitsOutTheBackoffBeforeRetryingAFailedEventAndLetsNothingOvertakeIt() {
+        List<StockAdjustedV1> events = List.of(stockAdjusted("DXB-MARINA", 1), stockAdjusted("DXB-JLT", 2));
+        outbox.appendCommitted(events);
+        UUID first = events.getFirst().eventId();
+        publisher.failWhen(event -> event.id().equals(first));
+        relay(10).relay();
+        publisher.heal();
+
+        assertThat(nextAttemptAt(first)).isEqualTo(NOW.plusSeconds(1));
+        assertThat(relayAt(NOW.plusMillis(999)).relay()).isEqualTo(new RelayRound(true, 0, false));
+        assertThat(publisher.published())
+                .as("the failed event waits, and so does everything after it")
+                .isEmpty();
+
+        assertThat(relayAt(NOW.plusSeconds(1)).relay()).isEqualTo(new RelayRound(true, 2, false));
+        assertThat(publisher.published()).containsExactlyElementsOf(ids(events));
+    }
+
+    @Test
+    void doublesTheBackoffAfterEveryFailureUpToTheMaximum() {
+        StockAdjustedV1 poison = stockAdjusted("DXB-MARINA", 1);
+        outbox.appendCommitted(List.of(poison));
+        publisher.failWhen(event -> true);
+        List<Duration> waits = new ArrayList<>();
+        Instant attemptAt = NOW;
+
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            relayAt(attemptAt, Duration.ofSeconds(5)).relay();
+            Instant next = nextAttemptAt(poison.eventId());
+            waits.add(Duration.between(attemptAt, next));
+            attemptAt = next;
+        }
+
+        assertThat(waits)
+                .containsExactly(
+                        Duration.ofSeconds(1),
+                        Duration.ofSeconds(2),
+                        Duration.ofSeconds(4),
+                        Duration.ofSeconds(5),
+                        Duration.ofSeconds(5));
+        assertThat(outbox.jdbc
+                        .sql("SELECT attempts FROM messaging.outbox_event")
+                        .query(Integer.class)
+                        .single())
+                .isEqualTo(5);
     }
 
     @Test
@@ -206,6 +258,29 @@ class OutboxRelayTest {
                 OutboxFixtures.CLOCK,
                 meters,
                 properties(batchSize, 1000));
+    }
+
+    /** A relay whose clock reads {@code now}: relays are cheap, so moving time means building another one. */
+    private OutboxRelay relayAt(Instant now) {
+        return relayAt(now, Duration.ofMinutes(5));
+    }
+
+    private OutboxRelay relayAt(Instant now, Duration maxBackoff) {
+        return new OutboxRelay(
+                outbox.repository,
+                publisher,
+                outbox.transactionManager,
+                Clock.fixed(now, ZoneOffset.UTC),
+                meters,
+                properties(10, 1000, maxBackoff));
+    }
+
+    private Instant nextAttemptAt(UUID id) {
+        return outbox.jdbc
+                .sql("SELECT next_attempt_at FROM messaging.outbox_event WHERE id = :id")
+                .param("id", id)
+                .query((rs, n) -> rs.getObject(1, OffsetDateTime.class).toInstant())
+                .single();
     }
 
     private static List<UUID> ids(List<? extends IntegrationEvent> events) {

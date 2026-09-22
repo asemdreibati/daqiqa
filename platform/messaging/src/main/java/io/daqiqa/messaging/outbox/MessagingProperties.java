@@ -41,10 +41,15 @@ public record MessagingProperties(
     /**
      * @param interval pause between two relay rounds ({@code daqiqa.messaging.relay.interval})
      * @param batchSize maximum number of events published per round
+     * @param initialBackoff wait before retrying an event whose publication failed once; doubled at every further
+     *     failure
+     * @param maxBackoff the longest wait between two attempts at a failing event
      */
     public record Relay(
             @DefaultValue(Relay.DEFAULT_INTERVAL) Duration interval,
-            @DefaultValue("100") int batchSize) {
+            @DefaultValue("100") int batchSize,
+            @DefaultValue("1s") Duration initialBackoff,
+            @DefaultValue("5m") Duration maxBackoff) {
 
         /** Shared with the {@code @Scheduled} placeholder so the two defaults cannot drift apart. */
         public static final String DEFAULT_INTERVAL = "250ms";
@@ -52,6 +57,12 @@ public record MessagingProperties(
         public Relay {
             requirePositive(interval, "daqiqa.messaging.relay.interval");
             requirePositive(batchSize, "daqiqa.messaging.relay.batch-size");
+            requirePositive(initialBackoff, "daqiqa.messaging.relay.initial-backoff");
+            requirePositive(maxBackoff, "daqiqa.messaging.relay.max-backoff");
+            if (maxBackoff.compareTo(initialBackoff) < 0) {
+                throw new IllegalArgumentException(
+                        "daqiqa.messaging.relay.max-backoff must not be shorter than the initial backoff");
+            }
         }
     }
 

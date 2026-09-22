@@ -3,6 +3,8 @@ package io.daqiqa.messaging.outbox;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -24,8 +26,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <p><b>Why stop at the first failure.</b> If event <i>n</i> cannot be published, a later event with the same key must
  * not overtake it. The round records the failed attempt on event <i>n</i>, marks what it published before it, and
- * ends; the next round starts again at event <i>n</i>. A poison event therefore blocks the relay until someone looks
- * at it, which is why failures and the backlog are metrics worth alerting on.
+ * ends. Event <i>n</i> is retried after a backoff that doubles with every failure (1 s, 2 s, 4 s, ... up to 5 min by
+ * default), and nothing after it is published meanwhile: a broker outage costs little retry traffic, and a poison
+ * event blocks the relay until someone fixes it, which is why failures and the backlog are metrics worth alerting on.
  *
  * <p><b>Delivery is at-least-once.</b> If the process dies after the broker acknowledged an event but before the round
  * committed, the event is published again by the next leader. Consumers deduplicate on the event id.
@@ -46,6 +49,8 @@ class OutboxRelay {
     private final Clock clock;
     private final MeterRegistry meters;
     private final int batchSize;
+    private final Duration initialBackoff;
+    private final Duration maxBackoff;
 
     OutboxRelay(
             OutboxRepository repository,
@@ -60,6 +65,8 @@ class OutboxRelay {
         this.clock = clock;
         this.meters = meters;
         this.batchSize = properties.relay().batchSize();
+        this.initialBackoff = properties.relay().initialBackoff();
+        this.maxBackoff = properties.relay().maxBackoff();
     }
 
     /**
@@ -76,24 +83,20 @@ class OutboxRelay {
         if (!repository.tryAcquireRelayLock()) {
             return RelayRound.SKIPPED;
         }
+        Instant now = clock.instant();
         List<PendingEvent> batch = repository.lockNextBatch(batchSize);
         List<PendingEvent> published = new ArrayList<>(batch.size());
         boolean failed = false;
         for (PendingEvent event : batch) {
+            if (event.nextAttemptAt() != null && now.isBefore(event.nextAttemptAt())) {
+                break; // it failed recently and waits out its backoff; nothing after it may overtake it
+            }
             // Any exception from the publisher is a failed publication of this event, whatever its type: record it and
             // stop, rather than rolling back the whole round and re-publishing everything before it.
             try {
                 publisher.publish(event);
             } catch (RuntimeException e) {
-                repository.recordFailure(event, String.valueOf(e));
-                counter("daqiqa.outbox.failures", event).increment();
-                log.warn(
-                        "Could not publish outbox event {} ({}), attempt {}; the relay stops here and retries it next "
-                                + "round",
-                        event.id(),
-                        event.type(),
-                        event.attempts() + 1,
-                        e);
+                recordFailure(event, e, now);
                 failed = true;
                 break;
             }
@@ -102,6 +105,33 @@ class OutboxRelay {
         }
         repository.markPublished(published, clock.instant());
         return new RelayRound(true, published.size(), failed);
+    }
+
+    private void recordFailure(PendingEvent event, RuntimeException failure, Instant now) {
+        int attempts = event.attempts() + 1;
+        Instant nextAttempt = now.plus(backoff(attempts));
+        repository.recordFailure(event, String.valueOf(failure), nextAttempt);
+        counter("daqiqa.outbox.failures", event).increment();
+        // A poison event fails on every attempt until someone fixes it. Its 1st, 2nd, 4th, 8th... failures are logged
+        // at WARN, which with the doubling backoff is a handful of lines an hour; the others at DEBUG.
+        if (Integer.bitCount(attempts) == 1) {
+            log.warn(
+                    "Could not publish outbox event {} ({}), attempt {}; nothing after it is published until it is. "
+                            + "Next attempt at {}",
+                    event.id(),
+                    event.type(),
+                    attempts,
+                    nextAttempt,
+                    failure);
+        } else {
+            log.debug("Could not publish outbox event {}, attempt {}: {}", event.id(), attempts, failure.toString());
+        }
+    }
+
+    /** {@code initialBackoff} doubled for every failure after the first, capped at {@code maxBackoff}. */
+    Duration backoff(int attempts) {
+        Duration delay = initialBackoff.multipliedBy(1L << Math.min(attempts - 1, 30));
+        return delay.compareTo(maxBackoff) > 0 ? maxBackoff : delay;
     }
 
     private Counter counter(String name, PendingEvent event) {
