@@ -6,6 +6,7 @@ import io.daqiqa.kernel.StoreId;
 import io.daqiqa.testing.postgres.PostgresTestDatabase;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -56,7 +57,14 @@ public abstract class InventoryIntegrationTest {
 
     /** Current value of a counter; the registry lives as long as the cached context, so compare before and after. */
     protected double counter(String name, String tag, String value) {
-        Counter counter = meters.find(name).tag(tag, value).counter();
+        return count(meters.find(name).tag(tag, value).counter());
+    }
+
+    protected double counter(String name) {
+        return count(meters.find(name).counter());
+    }
+
+    private static double count(@Nullable Counter counter) {
         return counter == null ? 0 : counter.count();
     }
 }

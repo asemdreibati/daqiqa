@@ -48,6 +48,7 @@ class ReservationServiceTest {
     private final ReservationService service = new ReservationService(
             reservations,
             stockLevels,
+            mock(LockWaits.class),
             new RecordingOutboxWriter(),
             new InventoryMetrics(new SimpleMeterRegistry()),
             Clock.fixed(NOW, ZoneOffset.UTC));

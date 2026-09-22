@@ -3,12 +3,15 @@ package io.daqiqa.inventory.application;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
+import ch.qos.logback.classic.Level;
 import io.daqiqa.contracts.events.LineItemV1;
 import io.daqiqa.contracts.events.ReservationExpiredV1;
 import io.daqiqa.inventory.api.InventoryReservations;
 import io.daqiqa.inventory.api.ReservationRequest;
 import io.daqiqa.inventory.api.ReservationResult.Reserved;
+import io.daqiqa.inventory.support.CapturedLogs;
 import io.daqiqa.inventory.support.InventoryIntegrationTest;
+import io.daqiqa.inventory.support.InventoryTables.HeldLock;
 import io.daqiqa.inventory.support.InventoryTables.ReservationRow;
 import io.daqiqa.inventory.support.InventoryTables.StockRow;
 import io.daqiqa.kernel.SkuQuantity;
@@ -95,7 +98,8 @@ class ReservationExpirySweeperTest extends InventoryIntegrationTest {
                         JLT, "jlt-" + i, List.of(new SkuQuantity(MILK, 2)), Duration.ofMinutes(1))));
         clock.advance(Duration.ofMinutes(1));
 
-        int expired = new ReservationExpirySweeper(reservationService, metrics, clock, 4).sweep();
+        int expired =
+                new ReservationExpirySweeper(reservationService, metrics, clock, 4, Duration.ofSeconds(5)).sweep();
 
         assertThat(expired).isEqualTo(23);
         assertThat(tables.reservations()).extracting(ReservationRow::status).containsOnly("EXPIRED");
@@ -143,6 +147,37 @@ class ReservationExpirySweeperTest extends InventoryIntegrationTest {
         assertThat(oldestOverdueSeconds())
                 .as("the poison hold is overdue by 90 s, and the gauge says so")
                 .isEqualTo(90.0);
+    }
+
+    @Test
+    void aStockRowACheckoutIsHoldingIsContentionNotAPoisonHold() {
+        tables.stock(MARINA, MILK, 10);
+        Reserved abandoned = reserve("order-1", Duration.ofMinutes(1), new SkuQuantity(MILK, 2));
+        clock.advance(Duration.ofMinutes(2));
+        double contentions = counter(InventoryMetrics.EXPIRY_CONTENTION);
+        double batchFailures = counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "batch");
+        double holdFailures = counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "hold");
+
+        try (CapturedLogs logs = CapturedLogs.of(ReservationExpirySweeper.class);
+                HeldLock checkout = tables.holdStockRowLocked(MARINA, MILK)) {
+            long startedAt = System.nanoTime();
+
+            assertThat(sweeper.sweep()).isZero();
+
+            assertThat(Duration.ofNanos(System.nanoTime() - startedAt))
+                    .as("gave up after its own lock timeout instead of waiting for the checkout")
+                    .isLessThan(Duration.ofSeconds(3));
+            assertThat(logs.messagesAt(Level.ERROR)).isEmpty();
+            assertThat(logs.messagesAt(Level.INFO)).anyMatch(message -> message.startsWith("Gave up waiting"));
+        }
+
+        assertThat(counter(InventoryMetrics.EXPIRY_CONTENTION)).isEqualTo(contentions + 1);
+        assertThat(counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "batch")).isEqualTo(batchFailures);
+        assertThat(counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "hold")).isEqualTo(holdFailures);
+        assertThat(tables.reservation(abandoned.reservationId()).status()).isEqualTo("HELD");
+
+        assertThat(sweeper.sweep()).as("the row is free again").isEqualTo(1);
+        assertThat(tables.stockOf(MARINA, MILK).reserved()).isZero();
     }
 
     @Test

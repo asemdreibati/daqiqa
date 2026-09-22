@@ -26,6 +26,7 @@ import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.SkuQuantity;
 import io.daqiqa.messaging.OutboxWriter;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -61,6 +62,7 @@ public class ReservationService implements InventoryReservations {
 
     private final ReservationRepository reservations;
     private final StockLevelRepository stockLevels;
+    private final LockWaits lockWaits;
     private final OutboxWriter outbox;
     private final InventoryMetrics metrics;
     private final Clock clock;
@@ -68,11 +70,13 @@ public class ReservationService implements InventoryReservations {
     ReservationService(
             ReservationRepository reservations,
             StockLevelRepository stockLevels,
+            LockWaits lockWaits,
             OutboxWriter outbox,
             InventoryMetrics metrics,
             Clock clock) {
         this.reservations = reservations;
         this.stockLevels = stockLevels;
+        this.lockWaits = lockWaits;
         this.outbox = outbox;
         this.metrics = metrics;
         this.clock = clock;
@@ -229,9 +233,14 @@ public class ReservationService implements InventoryReservations {
      * sweep) are skipped rather than waited for ({@code FOR UPDATE SKIP LOCKED}): instances sweep side by side without
      * blocking each other or a checkout, and no hold is expired twice. The stock of the whole batch is returned with
      * one statement, its rows locked in (store, SKU) order.
+     *
+     * <p>Those stock rows are the one place this transaction does wait, behind a checkout holding the same SKU. It
+     * waits at most {@code lockTimeout} and then fails, so a hot row never keeps a scheduler thread; the sweeper reads
+     * that failure as contention and leaves the batch to the next round.
      */
     @Transactional
-    public int expireElapsedHolds(Instant now, int limit) {
+    public int expireElapsedHolds(Instant now, int limit, Duration lockTimeout) {
+        lockWaits.limitTo(lockTimeout);
         List<Transition> expiries = reservations.lockElapsedHolds(now, limit).stream()
                 .map(reservation -> reservation.expire(now))
                 .toList();
@@ -260,12 +269,13 @@ public class ReservationService implements InventoryReservations {
 
     /**
      * Expires one hold in a transaction of its own, if it is still held past its time and no other transaction holds
-     * its lock (then it is skipped, like in a batch).
+     * its lock (then it is skipped, like in a batch). Waits at most {@code lockTimeout} for its stock rows.
      *
      * @return whether it expired
      */
     @Transactional
-    public boolean expireElapsedHold(ReservationId reservationId, Instant now) {
+    public boolean expireElapsedHold(ReservationId reservationId, Instant now, Duration lockTimeout) {
+        lockWaits.limitTo(lockTimeout);
         Optional<Reservation> elapsed = reservations.lockElapsedHold(reservationId, now);
         elapsed.ifPresent(hold -> expire(List.of(hold.expire(now)), now, ExpiryTrigger.SWEEPER));
         return elapsed.isPresent();

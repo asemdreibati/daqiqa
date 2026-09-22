@@ -17,10 +17,14 @@ record InventoryProperties(@DefaultValue Expiry expiry) {
      * @param interval pause between the end of one sweep and the start of the next ({@code daqiqa.inventory.expiry
      *     .interval}, default 5s)
      * @param batchSize holds expired per transaction ({@code daqiqa.inventory.expiry.batch-size}, default 100)
+     * @param lockTimeout how long a sweep waits for a stock row a checkout is holding before giving up and leaving
+     *     those holds to the next round ({@code daqiqa.inventory.expiry.lock-timeout}, default 500ms). Well below the
+     *     application-wide lock timeout, so a hot row never keeps a scheduler thread.
      */
     record Expiry(
             @DefaultValue("5s") Duration interval,
-            @DefaultValue("100") int batchSize) {
+            @DefaultValue("100") int batchSize,
+            @DefaultValue("500ms") Duration lockTimeout) {
 
         Expiry {
             if (interval.isNegative() || interval.isZero()) {
@@ -30,6 +34,10 @@ record InventoryProperties(@DefaultValue Expiry expiry) {
             if (batchSize < 1) {
                 throw new IllegalArgumentException(
                         "daqiqa.inventory.expiry.batch-size must be positive, was " + batchSize);
+            }
+            if (lockTimeout.isNegative() || lockTimeout.isZero()) {
+                throw new IllegalArgumentException(
+                        "daqiqa.inventory.expiry.lock-timeout must be positive, was " + lockTimeout);
             }
         }
     }

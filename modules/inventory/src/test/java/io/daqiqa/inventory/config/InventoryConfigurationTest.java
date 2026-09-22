@@ -38,7 +38,8 @@ class InventoryConfigurationTest {
     void startsWithoutAnyConfigurationSweepingEveryFiveSecondsInBatchesOfOneHundred() {
         context.run(started -> {
             assertThat(started.getBean(InventoryProperties.class))
-                    .isEqualTo(new InventoryProperties(new InventoryProperties.Expiry(Duration.ofSeconds(5), 100)));
+                    .isEqualTo(new InventoryProperties(
+                            new InventoryProperties.Expiry(Duration.ofSeconds(5), 100, Duration.ofMillis(500))));
             assertThat(scheduledSweep(started.getBean(SchedulingConfigurer.class))
                             .getIntervalDuration())
                     .isEqualTo(Duration.ofSeconds(5));
@@ -46,17 +47,21 @@ class InventoryConfigurationTest {
     }
 
     @Test
-    void theScheduledTaskSweepsWithTheConfiguredBatchSizeAtTheConfiguredInterval() {
-        given(reservations.expireElapsedHolds(any(), eq(25))).willReturn(3);
+    void theScheduledTaskSweepsWithTheConfiguredBatchSizeLockTimeoutAndInterval() {
+        given(reservations.expireElapsedHolds(any(), eq(25), any())).willReturn(3);
 
-        context.withPropertyValues("daqiqa.inventory.expiry.interval=250ms", "daqiqa.inventory.expiry.batch-size=25")
+        context.withPropertyValues(
+                        "daqiqa.inventory.expiry.interval=250ms",
+                        "daqiqa.inventory.expiry.batch-size=25",
+                        "daqiqa.inventory.expiry.lock-timeout=750ms")
                 .run(started -> {
                     IntervalTask sweep = scheduledSweep(started.getBean(SchedulingConfigurer.class));
                     assertThat(sweep.getIntervalDuration()).isEqualTo(Duration.ofMillis(250));
 
                     sweep.getRunnable().run();
 
-                    verify(reservations).expireElapsedHolds(Instant.parse("2026-09-22T10:00:00Z"), 25);
+                    verify(reservations)
+                            .expireElapsedHolds(Instant.parse("2026-09-22T10:00:00Z"), 25, Duration.ofMillis(750));
                     assertThat(started.getBean(ReservationExpirySweeper.class)).isNotNull();
                 });
     }
@@ -75,6 +80,12 @@ class InventoryConfigurationTest {
                         .getFailure()
                         .rootCause()
                         .hasMessageContaining("interval must be positive"));
+        context.withPropertyValues("daqiqa.inventory.expiry.lock-timeout=0s")
+                .run(failed -> assertThat(failed)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .hasMessageContaining("lock-timeout must be positive"));
     }
 
     /** Registers the schedule the way {@code @EnableScheduling} would, without starting any thread. */
