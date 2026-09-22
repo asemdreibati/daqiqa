@@ -31,6 +31,21 @@ public interface ReservationRepository {
     List<Reservation> lockElapsedHolds(Instant now, int limit);
 
     /**
+     * Ids of up to {@code limit} held reservations whose hold ran out by {@code now}, earliest expiry first, without
+     * locking them.
+     */
+    List<ReservationId> findElapsedHoldIds(Instant now, int limit);
+
+    /**
+     * The reservation, locked until the end of the current transaction, if it is still a hold that ran out by
+     * {@code now} and no other transaction holds its lock (it is skipped, not waited for).
+     */
+    Optional<Reservation> lockElapsedHold(ReservationId id, Instant now);
+
+    /** When the longest-overdue hold ran out, if some hold that ran out by {@code now} is still held. */
+    Optional<Instant> oldestElapsedHoldExpiry(Instant now);
+
+    /**
      * Records transitions: each reservation's new status and end reason. A transition is applied only while its
      * reservation is still in the status the transition leaves, so a transition applied twice (a release returning its
      * stock twice, say) fails loudly instead of quietly corrupting the books.

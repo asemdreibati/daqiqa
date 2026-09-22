@@ -57,6 +57,9 @@ class ReservationConcurrencyTest extends InventoryIntegrationTest {
     @Autowired
     StockService stock;
 
+    @Autowired
+    InventoryMetrics metrics;
+
     @Test
     void twoHundredCustomersRacingForFiftyUnitsGetExactlyFiftyOfThem() throws Exception {
         tables.stock(MARINA, MILK, 50);
@@ -191,7 +194,7 @@ class ReservationConcurrencyTest extends InventoryIntegrationTest {
         clock.advance(Duration.ofMinutes(1));
 
         List<Integer> expired =
-                Concurrently.run(6, i -> new ReservationExpirySweeper(reservationService, clock, 10).sweep());
+                Concurrently.run(6, i -> new ReservationExpirySweeper(reservationService, metrics, clock, 10).sweep());
 
         assertThat(expired.stream().mapToInt(Integer::intValue).sum()).isEqualTo(300);
         assertThat(tables.reservations()).extracting(ReservationRow::status).containsOnly("EXPIRED");

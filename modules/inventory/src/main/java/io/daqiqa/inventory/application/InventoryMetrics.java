@@ -12,13 +12,17 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
-/** The numbers an operator asks about: how reservations turn out, why stock is released, how many holds expire. */
+/**
+ * The numbers an operator asks about: how reservations turn out, why stock is released, how many holds expire, and
+ * whether expiry is failing.
+ */
 @Component
-class InventoryMetrics {
+public class InventoryMetrics {
 
     static final String RESERVATIONS = "daqiqa.inventory.reservations";
     static final String RELEASES = "daqiqa.inventory.releases";
     static final String EXPIRATIONS = "daqiqa.inventory.expirations";
+    static final String EXPIRY_FAILURES = "daqiqa.inventory.expiry.failures";
     static final String RESERVE = "daqiqa.inventory.reserve";
 
     enum ReserveOutcome {
@@ -39,9 +43,17 @@ class InventoryMetrics {
         REPLAY
     }
 
+    enum ExpiryFailure {
+        /** A batch of holds could not expire together; the sweeper retries them one by one. */
+        BATCH,
+        /** One hold could not expire on its own; it stays held until someone repairs its stock rows. */
+        HOLD
+    }
+
     private final Map<ReserveOutcome, Counter> reservations;
     private final Map<ReleaseReason, Counter> releases;
     private final Map<ExpiryTrigger, Counter> expirations;
+    private final Map<ExpiryFailure, Counter> expiryFailures;
     private final Timer reserve;
 
     InventoryMetrics(MeterRegistry registry) {
@@ -63,6 +75,12 @@ class InventoryMetrics {
                         .description("Holds that expired before being confirmed, by what noticed it")
                         .tag("trigger", tagValue(trigger))
                         .register(registry));
+        expiryFailures = counters(
+                ExpiryFailure.class,
+                failure -> Counter.builder(EXPIRY_FAILURES)
+                        .description("Failed attempts to expire holds, by scope")
+                        .tag("scope", tagValue(failure))
+                        .register(registry));
         reserve = Timer.builder(RESERVE)
                 .description("Time to decide and apply a reservation, including waiting for row locks")
                 .publishPercentileHistogram()
@@ -83,6 +101,10 @@ class InventoryMetrics {
 
     void expired(int count, ExpiryTrigger trigger) {
         expirations.get(trigger).increment(count);
+    }
+
+    void expiryFailed(ExpiryFailure failure) {
+        expiryFailures.get(failure).increment();
     }
 
     private static <E extends Enum<E>> Map<E, Counter> counters(Class<E> keys, Function<E, Counter> counter) {

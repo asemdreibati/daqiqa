@@ -175,6 +175,32 @@ class JdbcReservationRepositoryTest extends PostgresRepositoryTest {
     }
 
     @Test
+    void listsElapsedHoldsOldestFirstAndLocksOneOnlyWhileItIsStillElapsedAndFree() {
+        Reservation older = expiringAt("order-1", NOW.minusSeconds(60));
+        Reservation newer = expiringAt("order-2", NOW.minusSeconds(30));
+        Reservation running = expiringAt("order-3", NOW.plusSeconds(30));
+        List.of(newer, running, older).forEach(reservation -> repository.insertIfReferenceFree(reservation, NOW));
+
+        assertThat(repository.findElapsedHoldIds(NOW, 10)).containsExactly(older.id(), newer.id());
+        assertThat(repository.findElapsedHoldIds(NOW, 1)).containsExactly(older.id());
+        assertThat(repository.oldestElapsedHoldExpiry(NOW)).contains(older.expiresAt());
+        assertThat(repository.oldestElapsedHoldExpiry(NOW.minusSeconds(61))).isEmpty();
+
+        transaction.executeWithoutResult(status -> {
+            assertThat(repository.lockElapsedHold(older.id(), NOW)).contains(older);
+            assertThat(repository.lockElapsedHold(running.id(), NOW))
+                    .as("still running")
+                    .isEmpty();
+            assertThat(inAnotherTransaction(() -> {
+                        waitForLocksAtMost(Duration.ofMillis(200));
+                        return repository.lockElapsedHold(older.id(), NOW);
+                    }))
+                    .as("locked elsewhere: skipped, not waited for")
+                    .isEmpty();
+        });
+    }
+
+    @Test
     void appliesTransitionsWithTheirEndReasons() {
         Reservation first = hold("order-1", new SkuQuantity(MILK, 1));
         Reservation second = hold("order-2", new SkuQuantity(MILK, 1));

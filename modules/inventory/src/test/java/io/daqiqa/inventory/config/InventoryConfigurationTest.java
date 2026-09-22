@@ -7,8 +7,11 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+import io.daqiqa.inventory.application.InventoryMetrics;
 import io.daqiqa.inventory.application.ReservationExpirySweeper;
 import io.daqiqa.inventory.application.ReservationService;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -27,6 +30,8 @@ class InventoryConfigurationTest {
     private final ApplicationContextRunner context = new ApplicationContextRunner()
             .withUserConfiguration(InventoryConfiguration.class)
             .withBean(ReservationService.class, () -> reservations)
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+            .withBean(InventoryMetrics.class)
             .withBean(Clock.class, () -> Clock.fixed(Instant.parse("2026-09-22T10:00:00Z"), ZoneOffset.UTC));
 
     @Test

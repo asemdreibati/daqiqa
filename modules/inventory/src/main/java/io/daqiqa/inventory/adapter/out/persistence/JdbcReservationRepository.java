@@ -123,6 +123,45 @@ class JdbcReservationRepository implements ReservationRepository {
     }
 
     @Override
+    public List<ReservationId> findElapsedHoldIds(Instant now, int limit) {
+        return jdbc.sql("""
+                        SELECT id
+                          FROM inventory.reservation
+                         WHERE status = 'HELD' AND expires_at <= :now
+                         ORDER BY expires_at
+                         LIMIT :limit""")
+                .param("now", timestamp(now))
+                .param("limit", limit)
+                .query((rs, row) -> ReservationId.of(rs.getObject("id", UUID.class)))
+                .list();
+    }
+
+    @Override
+    public Optional<Reservation> lockElapsedHold(ReservationId id, Instant now) {
+        return atMostOne(jdbc.sql(SELECT_WITH_LINES + " " + """
+                         WHERE r.id = :id AND r.status = 'HELD' AND r.expires_at <= :now
+                         ORDER BY l.sku
+                           FOR UPDATE OF r SKIP LOCKED""")
+                .param("id", id.value())
+                .param("now", timestamp(now))
+                .query(JdbcReservationRepository::reservations));
+    }
+
+    @Override
+    public Optional<Instant> oldestElapsedHoldExpiry(Instant now) {
+        // The first entry of the partial index on expires_at WHERE status = 'HELD'.
+        return jdbc.sql("""
+                        SELECT expires_at
+                          FROM inventory.reservation
+                         WHERE status = 'HELD' AND expires_at <= :now
+                         ORDER BY expires_at
+                         LIMIT 1""")
+                .param("now", timestamp(now))
+                .query((rs, row) -> SqlValues.instant(rs, "expires_at"))
+                .optional();
+    }
+
+    @Override
     public void apply(List<Transition> transitions, Instant now) {
         if (transitions.isEmpty()) {
             return;

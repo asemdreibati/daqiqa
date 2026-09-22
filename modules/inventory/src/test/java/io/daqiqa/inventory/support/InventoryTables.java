@@ -46,6 +46,15 @@ public final class InventoryTables {
                 .update();
     }
 
+    /** Overwrites what is reserved, bypassing every rule but the CHECK constraints: to break the books on purpose. */
+    public void overwriteReserved(StoreId store, Sku sku, int reserved) {
+        jdbc.sql("UPDATE inventory.stock_level SET reserved = :reserved WHERE store_id = :store AND sku = :sku")
+                .param("reserved", reserved)
+                .param("store", store.value())
+                .param("sku", sku.value())
+                .update();
+    }
+
     /** The stock row, or null when the store has no row for the SKU. */
     public @Nullable StockRow stockOf(StoreId store, Sku sku) {
         return jdbc.sql("""

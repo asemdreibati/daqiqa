@@ -244,6 +244,27 @@ public class ReservationService implements InventoryReservations {
      * events come next: the outbox is an append-only table nobody else waits on. The lock order stays the global one:
      * reservation rows, then stock rows by store and SKU.
      */
+    /**
+     * Ids of up to {@code limit} holds that ran out by {@code now}, earliest first, without locking them: for the
+     * sweeper to expire one at a time after a batch failed.
+     */
+    public List<ReservationId> elapsedHoldIds(Instant now, int limit) {
+        return reservations.findElapsedHoldIds(now, limit);
+    }
+
+    /**
+     * Expires one hold in a transaction of its own, if it is still held past its time and no other transaction holds
+     * its lock (then it is skipped, like in a batch).
+     *
+     * @return whether it expired
+     */
+    @Transactional
+    public boolean expireElapsedHold(ReservationId reservationId, Instant now) {
+        Optional<Reservation> elapsed = reservations.lockElapsedHold(reservationId, now);
+        elapsed.ifPresent(hold -> expire(List.of(hold.expire(now)), now, ExpiryTrigger.SWEEPER));
+        return elapsed.isPresent();
+    }
+
     private void expire(List<Transition> expiries, Instant now, ExpiryTrigger trigger) {
         reservations.apply(expiries, now);
         List<Reservation> expired = expiries.stream().map(Transition::to).toList();

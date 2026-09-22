@@ -30,6 +30,9 @@ class ReservationExpirySweeperTest extends InventoryIntegrationTest {
     @Autowired
     ReservationExpirySweeper sweeper;
 
+    @Autowired
+    InventoryMetrics metrics;
+
     @Test
     void returnsTheStockOfHoldsNobodyConfirmedInTime() {
         tables.stock(MARINA, MILK, 10);
@@ -92,7 +95,7 @@ class ReservationExpirySweeperTest extends InventoryIntegrationTest {
                         JLT, "jlt-" + i, List.of(new SkuQuantity(MILK, 2)), Duration.ofMinutes(1))));
         clock.advance(Duration.ofMinutes(1));
 
-        int expired = new ReservationExpirySweeper(reservationService, clock, 4).sweep();
+        int expired = new ReservationExpirySweeper(reservationService, metrics, clock, 4).sweep();
 
         assertThat(expired).isEqualTo(23);
         assertThat(tables.reservations()).extracting(ReservationRow::status).containsOnly("EXPIRED");
@@ -114,6 +117,50 @@ class ReservationExpirySweeperTest extends InventoryIntegrationTest {
 
         assertThat(stockRowFreeDuringAppend).containsExactly(true, true);
         assertThat(tables.stockOf(MARINA, MILK).reserved()).isZero();
+    }
+
+    @Test
+    void aHoldThatCannotExpireDoesNotStopTheOthersFromExpiring() {
+        tables.stock(MARINA, WATER, 10);
+        tables.stock(MARINA, MILK, 10);
+        reserve("order-poison", Duration.ofSeconds(30), new SkuQuantity(WATER, 2));
+        reserve("order-1", Duration.ofMinutes(1), new SkuQuantity(MILK, 1));
+        reserve("order-2", Duration.ofMinutes(1), new SkuQuantity(MILK, 2));
+        tables.overwriteReserved(MARINA, WATER, 0); // the books no longer cover the poison hold's units
+        double batchFailures = counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "batch");
+        double holdFailures = counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "hold");
+        clock.advance(Duration.ofMinutes(2));
+
+        assertThat(sweeper.sweep()).isEqualTo(2);
+
+        assertThat(tables.reservations())
+                .extracting(ReservationRow::reference, ReservationRow::status)
+                .containsExactly(
+                        tuple("order-poison", "HELD"), tuple("order-1", "EXPIRED"), tuple("order-2", "EXPIRED"));
+        assertThat(tables.stockOf(MARINA, MILK).reserved()).isZero();
+        assertThat(counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "batch")).isEqualTo(batchFailures + 1);
+        assertThat(counter(InventoryMetrics.EXPIRY_FAILURES, "scope", "hold")).isEqualTo(holdFailures + 1);
+        assertThat(oldestOverdueSeconds())
+                .as("the poison hold is overdue by 90 s, and the gauge says so")
+                .isEqualTo(90.0);
+    }
+
+    @Test
+    void reportsHowLongTheOldestOverdueHoldHasWaited() {
+        tables.stock(MARINA, MILK, 10);
+        reserve("order-1", Duration.ofSeconds(30), new SkuQuantity(MILK, 1));
+        reserve("order-2", Duration.ofMinutes(1), new SkuQuantity(MILK, 1));
+        assertThat(oldestOverdueSeconds()).isZero();
+
+        clock.advance(Duration.ofSeconds(45));
+        assertThat(oldestOverdueSeconds()).isEqualTo(15.0);
+
+        sweeper.sweep();
+        assertThat(oldestOverdueSeconds()).isZero();
+    }
+
+    private double oldestOverdueSeconds() {
+        return meters.get(ExpiryBacklogMetrics.OLDEST_OVERDUE).gauge().value();
     }
 
     private Reserved reserve(String reference, Duration holdFor, SkuQuantity... lines) {

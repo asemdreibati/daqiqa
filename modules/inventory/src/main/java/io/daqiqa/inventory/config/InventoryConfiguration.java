@@ -1,5 +1,6 @@
 package io.daqiqa.inventory.config;
 
+import io.daqiqa.inventory.application.InventoryMetrics;
 import io.daqiqa.inventory.application.ReservationExpirySweeper;
 import io.daqiqa.inventory.application.ReservationService;
 import java.time.Clock;
@@ -14,9 +15,9 @@ class InventoryConfiguration {
 
     @Bean
     ReservationExpirySweeper reservationExpirySweeper(
-            ReservationService reservations, Clock clock, InventoryProperties properties) {
+            ReservationService reservations, InventoryMetrics metrics, Clock clock, InventoryProperties properties) {
         return new ReservationExpirySweeper(
-                reservations, clock, properties.expiry().batchSize());
+                reservations, metrics, clock, properties.expiry().batchSize());
     }
 
     /**
