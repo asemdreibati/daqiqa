@@ -218,17 +218,29 @@ and the expiry commits with it. The API Javadoc states this; a test runs exactly
 **Holds expire exactly once, and one bad hold cannot stall the rest.** The sweeper takes batches with
 `FOR UPDATE SKIP LOCKED` (a CTE, so that `LIMIT` counts reservations, not lines) through the partial index on
 `expires_at WHERE status = 'HELD'`. Each batch is its own transaction. Concurrent sweepers take disjoint batches and
-never wait for each other. The queue is ordered across all stores. So if a batch fails (for example, one hold's stock
-rows are inconsistent), the sweeper:
+never wait for each other. The queue is ordered across all stores. So when a batch fails, the sweeper first reads what
+kind of failure it was:
 
-1. counts it (`daqiqa.inventory.expiry.failures{scope=batch}`);
-2. retries the same holds one per transaction, each locked with `SKIP LOCKED`;
-3. counts (`scope=hold`) and logs a hold that still fails, which stays held;
-4. lets the healthy holds expire.
+- **Contention** (a checkout holds a stock row of the batch): counted on `daqiqa.inventory.expiry.contention`, logged
+  at INFO, and the batch is left to the next round, seconds away. Nothing is retried hold by hold.
+- **Anything else** (one hold's stock rows are inconsistent, say): counted on
+  `daqiqa.inventory.expiry.failures{scope=batch}`, then the same holds are retried one per transaction, each locked
+  with `SKIP LOCKED`. A hold that still fails is counted (`scope=hold`), logged at ERROR and stays held; the healthy
+  ones expire.
 
-The loop ends when a batch is not full or expires nothing, so a sweep always terminates. The gauge
-`daqiqa.inventory.expiry.oldest.overdue` reads the longest-overdue hold from the database at each scrape. It keeps
-rising whatever stalls expiry, a sweeper that stopped running included.
+Contention is recognised by walking the cause chain for the SQL states `55P03` (lock timeout), `40P01` (deadlock) and
+`40001` (serialization failure): Spring leaves a lock timeout as an `UncategorizedSQLException`, so the state is the
+only reliable signal. The loop ends when a batch is not full, expires nothing, or ran into contention, so a sweep
+always terminates. The gauge `daqiqa.inventory.expiry.oldest.overdue` reads the longest-overdue hold from the database
+at each scrape. It keeps rising whatever stalls expiry, a sweeper that stopped running included.
+
+**What the sweeper waits for.** ADR-0005 and the server's `application.yaml` say scheduled jobs "never wait". That is
+true of the reservations a sweep picks (`FOR UPDATE SKIP LOCKED` skips the ones another transaction holds), but not of
+their stock rows: returning stock waits for a checkout holding the same SKU. So every sweeping transaction bounds its
+waits with `SET LOCAL lock_timeout` (`daqiqa.inventory.expiry.lock-timeout`, default 500 ms, well under the
+application-wide 3 s). A sweep waits at most that long, reads the timeout as contention, and retries next round; it
+never holds a scheduler thread or a pooled connection on a hot row. `SET LOCAL` ends with the transaction, so the
+shorter timeout reaches nothing else on that connection. The ADR wording is the architect's to correct.
 
 **Adjustments.** The steps, all in one transaction:
 
@@ -306,6 +318,7 @@ A refused change writes nothing.
 |---|---|---|
 | `daqiqa.inventory.expiry.interval` | `5s` | Pause between the end of one sweep and the start of the next |
 | `daqiqa.inventory.expiry.batch-size` | `100` | Holds expired per transaction |
+| `daqiqa.inventory.expiry.lock-timeout` | `500ms` | How long a sweeping transaction waits for a stock row a checkout holds, before giving up and leaving those holds to the next round |
 
 Invalid values (zero or negative) fail the startup. The module needs a `java.time.Clock` bean, an `OutboxWriter`, a
 `StoreDirectory` and a `ProductCatalog` from the application around it.
@@ -318,20 +331,21 @@ Invalid values (zero or negative) fail the startup. The module needs a `java.tim
 | `daqiqa.inventory.releases` | counter | `reason` = lower-case `ReleaseReason` | Reservations released on request (after commit) |
 | `daqiqa.inventory.expirations` | counter | `trigger` = `sweeper` \| `late_confirm` \| `replay` | Holds that expired unconfirmed (after commit; the tag is an addition) |
 | `daqiqa.inventory.expiry.failures` | counter | `scope` = `batch` \| `hold` | Failed attempts to expire holds: alert on `hold` |
+| `daqiqa.inventory.expiry.contention` | counter | | Sweeps that gave up waiting for a row lock and left those holds to the next round: ordinary under load, not an alert |
 | `daqiqa.inventory.expiry.oldest.overdue` | gauge (seconds) | | How long ago the longest-overdue hold should have expired: alert above a few sweep intervals |
 | `daqiqa.inventory.reserve` | timer (percentile histogram) | | Deciding and applying a reservation, including waiting for row locks |
 
 ### Tests and what they prove
 
-138 tests; `./gradlew :modules:inventory:build` is green. Every PostgreSQL test runs against a real server.
+147 tests; `./gradlew :modules:inventory:build` is green. Every PostgreSQL test runs against a real server.
 
 | Kind | Tests | Proves |
 |---|---|---|
 | Domain unit | 35 | Invariants of `StockLevel`, shortfalls, every state-machine transition (including the expiry boundary and the end-reason invariant) |
 | Property (jqwik, 1,000 tries each) | 2 | Random sequences of reserve, confirm, release, sweep, clock and adjust keep `0 ≤ reserved ≤ onHand` and `reserved = Σ active holds`, with every transition leaving the current state; a basket has no shortfall exactly when every line is covered |
-| Application unit | 15 | The race-only branches of `reserve` (including a run-out hold swept while the call waited for its lock), played deterministically; the sweeper's batching, fallback and termination; guards |
-| Persistence (PostgreSQL) | 27 | Every repository statement; the SQL refusing a double release and a re-expiry; locks proven with `lock_timeout` (SQLState 55P03) and `pg_stat_activity` (polled on its own connection) instead of sleeps; `SKIP LOCKED`; the unique-index wait on commit and on rollback; CHECK constraints; the append-only trigger |
-| Application integration (Spring + PostgreSQL) | 36 | Reserve, reject-writes-nothing, idempotency, replay after run-out (fresh, rejected, other store, confirmed), a caller's rollback and visibility, confirm, late confirm (also inside a caller that catches and commits), release, sweeper (including a poison hold, the gauge, and stock rows free while events are appended), adjustments (404, 422, 409, audit entry, event), availability, metrics (including after-commit counting) |
+| Application unit | 21 | The race-only branches of `reserve` (including a run-out hold swept while the call waited for its lock), played deterministically; the sweeper's batching, fallback, contention handling and termination; telling contention from failure by SQL state, including a driver that reports none; guards |
+| Persistence (PostgreSQL) | 29 | Every repository statement; the SQL refusing a double release and a re-expiry; a bounded lock wait that applies to its transaction only; locks proven with `lock_timeout` (SQLState 55P03) and `pg_stat_activity` (polled on its own connection) instead of sleeps; `SKIP LOCKED`; the unique-index wait on commit and on rollback; CHECK constraints; the append-only trigger |
+| Application integration (Spring + PostgreSQL) | 37 | Reserve, reject-writes-nothing, idempotency, replay after run-out (fresh, rejected, other store, confirmed), a caller's rollback and visibility, confirm, late confirm (also inside a caller that catches and commits), release, sweeper (including a poison hold, contention with a stock row really held by another connection, the gauge, and stock rows free while events are appended), adjustments (404, 422, 409, audit entry, event), availability, metrics (including after-commit counting) |
 | Concurrency (PostgreSQL) | 7 | 200 threads × 1 of 50 units → exactly 50 held, 150 rejected, no exceptions; opposite-order baskets → no deadlock, reserved equals the successful baskets; a mix of every operation → the books balance; simultaneous first calls with one reference → one hold, on both race paths; 6 sweepers → each of 300 holds expired once; retries of run-out holds racing checkouts and sweepers → each expired once, no deadlock |
 | Web slice | 12 | Both endpoints: JSON shape, status codes, problem `type`, `code` and properties, precedence over the global handler, and that a server-side `IllegalArgumentException` is not blamed on the client |
 | Configuration | 3 | Defaults, binding, validation; the schedule, checked without starting a thread |
@@ -349,6 +363,7 @@ fail.
 - The problem handler loses its `@Order`.
 - The status guard is removed from transitions.
 - Stock is released before the events are appended.
+- Lock contention is treated as a hold that cannot expire.
 
 ### Notes for the other modules
 
@@ -374,6 +389,8 @@ fail.
   names the next step: a Redis pre-reservation layer in front of the same guarantee.
 - **A poison hold stays held** until someone repairs its stock rows; the failure counter and the overdue gauge make
   it visible. Next: a runbook, and parking such holds so each sweep does not retry them.
+- **Sustained contention delays expiry.** Holds of a SKU contended for longer than a sweep interval wait for a later
+  round. The contention counter and the overdue gauge show it; the stock is still returned, just later.
 - **Same-reference reserve during that reference's release** can form a lock cycle. This needs a caller bug.
   PostgreSQL detects the cycle within `deadlock_timeout`, one call fails and can retry.
 - **Growth.** Ended reservations are kept forever. Next: retention or archival, possibly partitioning by

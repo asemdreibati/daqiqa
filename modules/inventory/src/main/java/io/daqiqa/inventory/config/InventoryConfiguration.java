@@ -17,7 +17,11 @@ class InventoryConfiguration {
     ReservationExpirySweeper reservationExpirySweeper(
             ReservationService reservations, InventoryMetrics metrics, Clock clock, InventoryProperties properties) {
         return new ReservationExpirySweeper(
-                reservations, metrics, clock, properties.expiry().batchSize());
+                reservations,
+                metrics,
+                clock,
+                properties.expiry().batchSize(),
+                properties.expiry().lockTimeout());
     }
 
     /**

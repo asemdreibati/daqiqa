@@ -29,6 +29,7 @@ public class InventoryMetrics {
     static final String RELEASES = "daqiqa.inventory.releases";
     static final String EXPIRATIONS = "daqiqa.inventory.expirations";
     static final String EXPIRY_FAILURES = "daqiqa.inventory.expiry.failures";
+    static final String EXPIRY_CONTENTION = "daqiqa.inventory.expiry.contention";
     static final String RESERVE = "daqiqa.inventory.reserve";
 
     enum ReserveOutcome {
@@ -60,6 +61,7 @@ public class InventoryMetrics {
     private final Map<ReleaseReason, Counter> releases;
     private final Map<ExpiryTrigger, Counter> expirations;
     private final Map<ExpiryFailure, Counter> expiryFailures;
+    private final Counter expiryContention;
     private final Timer reserve;
 
     InventoryMetrics(MeterRegistry registry) {
@@ -87,6 +89,9 @@ public class InventoryMetrics {
                         .description("Failed attempts to expire holds, by scope")
                         .tag("scope", tagValue(failure))
                         .register(registry));
+        expiryContention = Counter.builder(EXPIRY_CONTENTION)
+                .description("Times a sweep gave up waiting for a lock and left those holds to the next round")
+                .register(registry);
         reserve = Timer.builder(RESERVE)
                 .description("Time to decide and apply a reservation, including waiting for row locks")
                 .publishPercentileHistogram()
@@ -119,6 +124,10 @@ public class InventoryMetrics {
 
     void expiryFailed(ExpiryFailure failure) {
         expiryFailures.get(failure).increment();
+    }
+
+    void expiryContended() {
+        expiryContention.increment();
     }
 
     /** Runs {@code count} once the current transaction commits, or at once when there is no transaction. */

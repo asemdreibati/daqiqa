@@ -193,8 +193,10 @@ class ReservationConcurrencyTest extends InventoryIntegrationTest {
         }
         clock.advance(Duration.ofMinutes(1));
 
-        List<Integer> expired =
-                Concurrently.run(6, i -> new ReservationExpirySweeper(reservationService, metrics, clock, 10).sweep());
+        List<Integer> expired = Concurrently.run(
+                6,
+                i -> new ReservationExpirySweeper(reservationService, metrics, clock, 10, Duration.ofSeconds(5))
+                        .sweep());
 
         assertThat(expired.stream().mapToInt(Integer::intValue).sum()).isEqualTo(300);
         assertThat(tables.reservations()).extracting(ReservationRow::status).containsOnly("EXPIRED");

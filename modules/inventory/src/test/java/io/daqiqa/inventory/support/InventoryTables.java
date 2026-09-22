@@ -50,6 +50,42 @@ public final class InventoryTables {
                 .update();
     }
 
+    /**
+     * Locks a stock row from a connection of its own and keeps it locked until the handle is closed: what a checkout
+     * in flight looks like to everything else.
+     */
+    public HeldLock holdStockRowLocked(StoreId store, Sku sku) {
+        try {
+            Connection connection = dataSource.getConnection();
+            connection.setAutoCommit(false);
+            try (PreparedStatement lock = connection.prepareStatement(
+                    "SELECT 1 FROM inventory.stock_level WHERE store_id = ? AND sku = ? FOR UPDATE")) {
+                lock.setString(1, store.value());
+                lock.setString(2, sku.value());
+                lock.executeQuery().close();
+            }
+            return () -> release(connection);
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static void release(Connection connection) {
+        try (connection) {
+            connection.rollback();
+            connection.setAutoCommit(true);
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** A stock row held by someone else, until closed. */
+    public interface HeldLock extends AutoCloseable {
+
+        @Override
+        void close();
+    }
+
     /** Overwrites what is reserved, bypassing every rule but the CHECK constraints: to break the books on purpose. */
     public void overwriteReserved(StoreId store, Sku sku, int reserved) {
         jdbc.sql("UPDATE inventory.stock_level SET reserved = :reserved WHERE store_id = :store AND sku = :sku")
