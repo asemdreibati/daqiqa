@@ -39,6 +39,9 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 @Order(Ordered.HIGHEST_PRECEDENCE)
 class OrderingProblemHandler {
 
+    /** The longest a client is asked to wait for a request with the same key that is still running. */
+    static final long MAX_RETRY_AFTER_SECONDS = 2;
+
     @ExceptionHandler
     ProblemDetail missingHeader(MissingRequestHeaderException e) {
         if (OrderController.IDEMPOTENCY_KEY.equalsIgnoreCase(e.getHeaderName())) {
@@ -119,10 +122,14 @@ class OrderingProblemHandler {
                 Objects.requireNonNullElse(e.getMessage(), "No such order"));
     }
 
-    /** Whole seconds, rounded up and at least one: retrying sooner could only meet the same answer. */
-    static long retryAfterSeconds(Duration retryAfter) {
-        long seconds = retryAfter.toSeconds() + (retryAfter.toNanosPart() > 0 ? 1 : 0);
-        return Math.max(1, seconds);
+    /**
+     * The first request usually finishes within a second or two, so the client is asked back soon rather than at the
+     * end of the lease, which is only the worst case (the instance processing it died) and may be a minute away; never
+     * later than the lease itself, after which a retry takes the claim over. Whole seconds, rounded up, at least one.
+     */
+    static long retryAfterSeconds(Duration remainingLease) {
+        long leaseSeconds = remainingLease.toSeconds() + (remainingLease.toNanosPart() > 0 ? 1 : 0);
+        return Math.max(1, Math.min(MAX_RETRY_AFTER_SECONDS, leaseSeconds));
     }
 
     private static ProblemDetail validationFailed(List<String> errors) {

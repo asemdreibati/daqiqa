@@ -92,7 +92,7 @@ class CheckoutHttpTest extends OrderingIntegrationTest {
 
         assertThat(retry)
                 .hasStatus(HttpStatus.CONFLICT)
-                .hasHeader(HttpHeaders.RETRY_AFTER, "60")
+                .hasHeader(HttpHeaders.RETRY_AFTER, "2")
                 .bodyJson()
                 .extractingPath("$.code")
                 .isEqualTo("IDEMPOTENCY_REQUEST_IN_PROGRESS");

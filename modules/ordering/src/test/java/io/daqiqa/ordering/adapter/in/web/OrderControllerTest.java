@@ -195,14 +195,23 @@ class OrderControllerTest {
     }
 
     @Test
-    void asksTheClientToRetryWhileTheFirstRequestIsStillInProgress() {
+    void asksTheClientToRetrySoonWhileTheFirstRequestIsStillInProgress() {
         given(checkout.placeOrder(eq(KEY), any()))
                 .willThrow(new CheckoutInProgressException(Duration.ofMillis(42_100)));
 
         MvcTestResult result = placeOrder(KEY, VALID);
 
         assertProblem(result, HttpStatus.CONFLICT, "IDEMPOTENCY_REQUEST_IN_PROGRESS");
-        assertThat(result).hasHeader(HttpHeaders.RETRY_AFTER, "43");
+        assertThat(result)
+                .as("the first request usually finishes long before its lease ends")
+                .hasHeader(HttpHeaders.RETRY_AFTER, "2");
+    }
+
+    @Test
+    void neverAsksTheClientToWaitBeyondTheLease() {
+        given(checkout.placeOrder(eq(KEY), any())).willThrow(new CheckoutInProgressException(Duration.ofMillis(300)));
+
+        assertThat(placeOrder(KEY, VALID)).hasHeader(HttpHeaders.RETRY_AFTER, "1");
     }
 
     @Test
