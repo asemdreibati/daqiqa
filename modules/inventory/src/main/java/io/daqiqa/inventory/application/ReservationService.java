@@ -9,7 +9,6 @@ import io.daqiqa.inventory.api.ReservationRequest;
 import io.daqiqa.inventory.api.ReservationResult;
 import io.daqiqa.inventory.api.Shortage;
 import io.daqiqa.inventory.application.InventoryMetrics.ExpiryTrigger;
-import io.daqiqa.inventory.application.InventoryMetrics.ReserveOutcome;
 import io.daqiqa.inventory.domain.ConfirmOutcome;
 import io.daqiqa.inventory.domain.EndReason;
 import io.daqiqa.inventory.domain.HeldUnits;
@@ -132,7 +131,7 @@ public class ReservationService implements InventoryReservations {
                             + request.reference() + " ended while this call was waiting for it; retry")));
         }
         stockLevels.reserve(reservation.storeId(), reservation.lines(), now);
-        metrics.reservation(ReserveOutcome.RESERVED);
+        metrics.reserved();
         return new ReservationResult.Reserved(reservation.id(), reservation.expiresAt());
     }
 
@@ -280,12 +279,12 @@ public class ReservationService implements InventoryReservations {
     }
 
     private ReservationResult replayed(Reservation reservation) {
-        metrics.reservation(ReserveOutcome.REPLAYED);
+        metrics.replayed();
         return new ReservationResult.Reserved(reservation.id(), reservation.expiresAt());
     }
 
     private ReservationResult rejected(List<Shortfall> shortfalls) {
-        metrics.reservation(ReserveOutcome.REJECTED);
+        metrics.rejected();
         return new ReservationResult.Rejected(shortfalls.stream()
                 .map(shortfall -> new Shortage(shortfall.sku(), shortfall.requested(), shortfall.available()))
                 .toList());

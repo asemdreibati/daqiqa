@@ -357,6 +357,32 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
         assertThat(meters.get("daqiqa.inventory.reserve").timer().count()).isEqualTo(timed + 3);
     }
 
+    @Test
+    void countsChangesOnlyOnceTheyCommitButEveryAnswerAtOnce() {
+        tables.stock(MARINA, MILK, 3);
+        Reserved runningLate = assertReserved(reservations.reserve(basket("order-0", milk(1))));
+        clock.advance(HOLD);
+        double reserved = counter("daqiqa.inventory.reservations", "outcome", "reserved");
+        double rejected = counter("daqiqa.inventory.reservations", "outcome", "rejected");
+        double lateConfirms = counter("daqiqa.inventory.expirations", "trigger", "late_confirm");
+
+        inTransaction().executeWithoutResult(status -> {
+            assertReserved(reservations.reserve(basket("order-1", milk(1))));
+            assertThat(reservations.reserve(basket("order-2", milk(5)))).isInstanceOf(Rejected.class);
+            assertThatThrownBy(() -> reservations.confirm(runningLate.reservationId()))
+                    .isInstanceOf(ReservationNoLongerHeldException.class);
+            status.setRollbackOnly(); // the caller's order failed: none of it happened
+        });
+
+        assertThat(counter("daqiqa.inventory.reservations", "outcome", "reserved"))
+                .isEqualTo(reserved);
+        assertThat(counter("daqiqa.inventory.expirations", "trigger", "late_confirm"))
+                .isEqualTo(lateConfirms);
+        assertThat(counter("daqiqa.inventory.reservations", "outcome", "rejected"))
+                .as("the caller was told, whatever became of its transaction")
+                .isEqualTo(rejected + 1);
+    }
+
     private TransactionTemplate inTransaction() {
         return new TransactionTemplate(transactionManager);
     }

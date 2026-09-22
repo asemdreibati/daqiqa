@@ -11,10 +11,16 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * The numbers an operator asks about: how reservations turn out, why stock is released, how many holds expire, and
  * whether expiry is failing.
+ *
+ * <p>Counters of changes (a hold placed, released or expired) count once the change commits: when the caller's
+ * transaction rolls back, the change never happened. Counters of answers (a rejection, a replay) count at once: the
+ * caller was given that answer whatever becomes of its transaction.
  */
 @Component
 public class InventoryMetrics {
@@ -91,20 +97,42 @@ public class InventoryMetrics {
         return reserve.record(reservation);
     }
 
-    void reservation(ReserveOutcome outcome) {
-        reservations.get(outcome).increment();
+    void reserved() {
+        afterCommit(() -> reservations.get(ReserveOutcome.RESERVED).increment());
+    }
+
+    void rejected() {
+        reservations.get(ReserveOutcome.REJECTED).increment();
+    }
+
+    void replayed() {
+        reservations.get(ReserveOutcome.REPLAYED).increment();
     }
 
     void released(ReleaseReason reason) {
-        releases.get(reason).increment();
+        afterCommit(() -> releases.get(reason).increment());
     }
 
     void expired(int count, ExpiryTrigger trigger) {
-        expirations.get(trigger).increment(count);
+        afterCommit(() -> expirations.get(trigger).increment(count));
     }
 
     void expiryFailed(ExpiryFailure failure) {
         expiryFailures.get(failure).increment();
+    }
+
+    /** Runs {@code count} once the current transaction commits, or at once when there is no transaction. */
+    private static void afterCommit(Runnable count) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            count.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                count.run();
+            }
+        });
     }
 
     private static <E extends Enum<E>> Map<E, Counter> counters(Class<E> keys, Function<E, Counter> counter) {
