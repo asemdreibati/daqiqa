@@ -15,7 +15,9 @@ import org.springframework.web.client.RestClient;
 
 /** Boots the whole server against a real PostgreSQL with all migrations and demo data applied. */
 @Tag("integration")
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "daqiqa.messaging.publisher=logging")
 class DaqiqaServerApplicationTest {
 
     @DynamicPropertySource

@@ -3,20 +3,48 @@ spring:
     name: daqiqa-server
   threads:
     virtual:
-      enabled: true # Java 21 virtual threads: blocking I/O without thread-pool exhaustion
+      enabled: true # Java 21 virtual threads: blocking I/O without thread-pool exhaustion (ADR-0013)
   datasource:
     url: ${DAQIQA_DB_URL:jdbc:postgresql://localhost:5432/daqiqa}
     username: ${DAQIQA_DB_USER:daqiqa}
     password: ${DAQIQA_DB_PASSWORD:daqiqa}
     hikari:
       maximum-pool-size: ${DAQIQA_DB_POOL_SIZE:20}
+      # Bound every lock wait. A checkout stuck behind a hot stock row fails fast (the client retries with its
+      # idempotency key) instead of piling up connections. Scheduled jobs use SKIP LOCKED or try-locks and never wait.
+      connection-init-sql: "SET lock_timeout = '3s'"
   flyway:
-    # db/migration: schema owned by each module. db/demo: demo data (disable in real deployments).
+    # db/migration: schema owned by each module. db/demo: Dubai demo data (drop it in real deployments).
     locations: ${DAQIQA_FLYWAY_LOCATIONS:classpath:db/migration,classpath:db/demo}
     out-of-order: true # modules own disjoint major versions; see docs/engineering/conventions.md
   mvc:
     problemdetails:
       enabled: true # RFC 9457 responses for framework errors too
+  kafka:
+    bootstrap-servers: ${DAQIQA_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5 # at most 5 keeps idempotent retries in order
+        max.block.ms: 5000 # at most the relay's send timeout: send() must not stall the relay longer
+        linger.ms: 0 # the relay sends one event and waits for it; batching delay would be pure latency
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 8000 # below daqiqa.messaging.kafka.send-timeout: a recorded failure is final
+    # Never set spring.kafka.producer.transaction-id-prefix: Boot would add a KafkaTransactionManager that displaces
+    # the JDBC transaction manager the outbox and checkout rely on.
+
+daqiqa:
+  messaging:
+    # kafka by default, so a missing setting can never silently drop events. Use logging for runs without a broker.
+    publisher: ${DAQIQA_EVENT_PUBLISHER:kafka}
+  promise:
+    token:
+      # Development key only. Real deployments mount their keys as daqiqa.promise.token.keys.<kid> from a secret store
+      # and set active-key-id; the server logs a warning while the development key is active.
+      active-key-id: ${DAQIQA_PROMISE_TOKEN_KEY_ID:dev}
+      keys:
+        dev: ${DAQIQA_PROMISE_TOKEN_DEV_KEY:ZGFxaXFhLWRldi1vbmx5LXByb21pc2Utc2lnbmluZy1rZXkh}
 
 server:
   shutdown: graceful

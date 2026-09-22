@@ -31,6 +31,9 @@ import org.springframework.stereotype.Repository;
 @Repository
 class JdbcOrderRepository implements OrderRepository {
 
+    /** Advisory-lock namespace for {@link #lockPromise}: "ORD" in ASCII. */
+    private static final int PROMISE_LOCK_NAMESPACE = 0x4F5244;
+
     private static final String SELECT_ORDER = """
             SELECT id, customer_id, promise_id, store_id, tier, eta_minutes, placed_at, delivery_latitude,
                    delivery_longitude, payment_method, reservation_id, total_minor, currency, status
@@ -77,6 +80,19 @@ class JdbcOrderRepository implements OrderRepository {
         }
         insertLines(order);
         return true;
+    }
+
+    @Override
+    public void lockPromise(PromiseId promiseId) {
+        // Two-key advisory lock: a namespace for promises plus a 32-bit hash of the id. The two-key form never collides
+        // with single-key advisory locks (the outbox relay's). A hash collision only makes two unrelated checkouts wait
+        // for each other for one short transaction; the partial unique index still guarantees one live order per
+        // promise.
+        jdbc.sql("SELECT 1 FROM pg_advisory_xact_lock(:namespace, :key)")
+                .param("namespace", PROMISE_LOCK_NAMESPACE)
+                .param("key", promiseId.value().hashCode())
+                .query(Integer.class)
+                .single();
     }
 
     @Override

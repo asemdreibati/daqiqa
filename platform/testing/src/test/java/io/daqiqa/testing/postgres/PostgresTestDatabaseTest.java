@@ -13,4 +13,15 @@ class PostgresTestDatabaseTest {
         assertThat(PostgresTestDatabase.withDatabase("jdbc:postgresql://db:5432/postgres?sslmode=disable", "t2"))
                 .isEqualTo("jdbc:postgresql://db:5432/t2?sslmode=disable");
     }
+
+    @Test
+    void recognisesStaleTestDatabasesByTheirCreationSecond() {
+        assertThat(PostgresTestDatabase.createdBefore("daqiqa_test_1000_ab12cd34", 2000))
+                .isTrue();
+        assertThat(PostgresTestDatabase.createdBefore("daqiqa_test_3000_ab12cd34", 2000))
+                .isFalse();
+        assertThat(PostgresTestDatabase.createdBefore("daqiqa_test_0123456789abcdef", 2000))
+                .as("names from the previous scheme are always stale")
+                .isTrue();
+    }
 }

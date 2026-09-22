@@ -172,7 +172,10 @@ class CheckoutTransactions {
     private Opening holdAndCreate(
             Claim claim, PlaceOrderCommand command, VerifiedPromise promise, PricingResult.Priced basket) {
         // Checked before holding any stock, so a second order under a used promise is told so, not that the first
-        // order's items are out of stock. The insert below settles the race between two new orders.
+        // order's items are out of stock. The promise lock makes that answer deterministic when checkouts race: a
+        // latecomer waits for the first checkout's transaction and then sees its order. The insert below stays as a
+        // second line of defence (the partial unique index).
+        orders.lockPromise(promise.promiseId());
         if (orders.promiseInUse(promise.promiseId())) {
             return new Opening.Settled(reject(claim, new CheckoutRejection.PromiseAlreadyUsed()));
         }

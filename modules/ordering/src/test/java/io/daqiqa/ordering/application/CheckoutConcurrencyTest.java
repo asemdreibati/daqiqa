@@ -105,24 +105,41 @@ class CheckoutConcurrencyTest extends OrderingIntegrationTest {
     }
 
     @Test
-    void aCheckoutThatLosesThePromiseRaceAfterHoldingStockGivesTheStockBack() throws Exception {
+    void aCheckoutUnderAPromiseThatIsBeingOrderedWaitsAndIsToldThePromiseIsUsed() throws Exception {
         PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2), line(BREAD, 1));
         Gate reserving = inventory.holdNextReservation();
 
-        try (ExecutorService attemptA = Executors.newSingleThreadExecutor()) {
-            Future<CheckoutResponse> loser = attemptA.submit(() -> checkout.placeOrder("promise-race-key-a", command));
-            reserving.awaitArrival(); // A found the promise unused and is about to hold the stock
-            CheckoutResponse winner = checkout.placeOrder("promise-race-key-b", command); // B commits its order first
+        try (ExecutorService attempts = Executors.newFixedThreadPool(2)) {
+            Future<CheckoutResponse> first = attempts.submit(() -> checkout.placeOrder("promise-race-key-a", command));
+            reserving.awaitArrival(); // A holds the promise lock and is about to hold the stock
+            Future<CheckoutResponse> second = attempts.submit(() -> checkout.placeOrder("promise-race-key-b", command));
+            awaitACheckoutWaitingForThePromiseLock(); // B queues behind A instead of racing it for the stock
             reserving.open();
-            CheckoutResponse refused = loser.get(30, TimeUnit.SECONDS);
 
-            assertThat(winner.response().status()).isEqualTo(201);
+            CheckoutResponse placed = first.get(30, TimeUnit.SECONDS);
+            CheckoutResponse refused = second.get(30, TimeUnit.SECONDS);
+
+            assertThat(placed.response().status()).isEqualTo(201);
             assertThat(refused.response().status()).isEqualTo(409);
             assertThat(refused.response().body()).contains("PROMISE_ALREADY_USED");
             assertThat(inventory.reservationsFor(refused.orderId().toString()))
-                    .as("A's hold was rolled back with its order")
+                    .as("B never held stock")
                     .isEmpty();
-            assertExactlyOneOrder(winner.orderId());
+            assertExactlyOneOrder(placed.orderId());
+        }
+    }
+
+    /** Polls the lock manager (a live view, unlike pg_stat_activity) until a session waits on an advisory lock. */
+    private void awaitACheckoutWaitingForThePromiseLock() {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (jdbc.sql("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+                        .query(Long.class)
+                        .single()
+                == 0) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("no checkout started waiting for the promise lock");
+            }
+            sleep(10);
         }
     }
 

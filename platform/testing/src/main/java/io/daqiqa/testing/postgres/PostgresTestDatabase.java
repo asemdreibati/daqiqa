@@ -7,6 +7,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -26,8 +27,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * <ul>
  *   <li><b>Testcontainers</b> (default, used in CI): a {@code postgres:17-alpine} container is started once per JVM.
  *   <li><b>External server</b>: when {@code DAQIQA_TEST_PG_URL} is set (for example
- *       {@code jdbc:postgresql://localhost:5432/postgres}), a uniquely named database is created on that server and
- *       dropped when the JVM exits. Credentials come from {@code DAQIQA_TEST_PG_USER} / {@code DAQIQA_TEST_PG_PASSWORD}
+ *       {@code jdbc:postgresql://localhost:5432/postgres}), a uniquely named database is created on that server;
+ *       databases older than an hour are dropped by later runs. Credentials come from {@code DAQIQA_TEST_PG_USER} / {@code DAQIQA_TEST_PG_PASSWORD}
  *       (default {@code postgres}/{@code postgres}). Useful on machines without Docker.
  * </ul>
  *
@@ -37,6 +38,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 public final class PostgresTestDatabase {
 
     private static final String IMAGE = "postgres:17-alpine";
+    private static final String DATABASE_PREFIX = "daqiqa_test_";
+    private static final long STALE_AFTER_SECONDS = 3_600;
     private static volatile PostgresTestDatabase shared;
 
     private final String jdbcUrl;
@@ -86,19 +89,51 @@ public final class PostgresTestDatabase {
     private static PostgresTestDatabase createOnExternalServer(String adminUrl) {
         String user = envOrDefault("DAQIQA_TEST_PG_USER", "postgres");
         String pass = envOrDefault("DAQIQA_TEST_PG_PASSWORD", "postgres");
-        String database =
-                "daqiqa_test_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        long now = Instant.now().getEpochSecond();
+        dropStaleTestDatabases(adminUrl, user, pass, now);
+        String database = DATABASE_PREFIX + now + "_"
+                + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         execute(adminUrl, user, pass, "CREATE DATABASE " + database);
-        PostgresTestDatabase db = new PostgresTestDatabase(withDatabase(adminUrl, database), user, pass);
-        Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(() -> {
-            db.dataSource.close();
-            try {
-                execute(adminUrl, user, pass, "DROP DATABASE IF EXISTS " + database + " WITH (FORCE)");
-            } catch (RuntimeException ignored) {
-                // Best effort: a leftover test database is harmless.
+        return new PostgresTestDatabase(withDatabase(adminUrl, database), user, pass);
+    }
+
+    /**
+     * Test databases are not dropped when their JVM exits: shutdown hooks run concurrently, so a drop could pull the
+     * database from under a Spring context that is still stopping, and its scheduled jobs would fail noisily. Instead,
+     * each new test JVM drops test databases created more than an hour ago, which no running build still uses.
+     */
+    private static void dropStaleTestDatabases(String adminUrl, String user, String pass, long now) {
+        List<String> stale = new ArrayList<>();
+        try (Connection connection = DriverManager.getConnection(adminUrl, user, pass);
+                Statement statement = connection.createStatement();
+                ResultSet rs = statement.executeQuery(
+                        "SELECT datname FROM pg_database WHERE datname LIKE 'daqiqa\\_test\\_%'")) {
+            while (rs.next()) {
+                String name = rs.getString(1);
+                if (createdBefore(name, now - STALE_AFTER_SECONDS)) {
+                    stale.add(name);
+                }
             }
-        }));
-        return db;
+        } catch (SQLException e) {
+            return; // Housekeeping only: never fail a build because old databases could not be listed.
+        }
+        for (String name : stale) {
+            try {
+                execute(adminUrl, user, pass, "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+            } catch (RuntimeException ignored) {
+                // Another JVM may be dropping it at the same moment; either way it is gone or will be next time.
+            }
+        }
+    }
+
+    /** Names look like {@code daqiqa_test_<epochSecond>_<random>}; anything else is a leftover from an older scheme. */
+    static boolean createdBefore(String databaseName, long epochSecond) {
+        String[] parts = databaseName.substring(DATABASE_PREFIX.length()).split("_");
+        try {
+            return Long.parseLong(parts[0]) < epochSecond;
+        } catch (NumberFormatException e) {
+            return true;
+        }
     }
 
     public String jdbcUrl() {

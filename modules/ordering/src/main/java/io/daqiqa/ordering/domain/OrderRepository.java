@@ -21,6 +21,13 @@ public interface OrderRepository {
      */
     boolean insertUnlessPromiseInUse(Order order);
 
+    /**
+     * Serialises new orders under one promise until the current transaction ends. Of several checkouts racing under the
+     * same promise, exactly one gets past this point first; the others wait, then see its order through
+     * {@link #promiseInUse} instead of finding its items already held (which would wrongly read as out of stock).
+     */
+    void lockPromise(PromiseId promiseId);
+
     /** Whether a live order ({@code AWAITING_PAYMENT} or {@code CONFIRMED}) uses this promise. */
     boolean promiseInUse(PromiseId promiseId);
 
