@@ -87,7 +87,10 @@ class InventoryInvariantProperties {
         Arbitrary<Operation> operation = Arbitraries.<Operation>frequencyOf(
                 Tuple.of(4, baskets().map(Reserve::new)),
                 Tuple.of(2, anyReservation.map(Confirm::new)),
-                Tuple.of(2, anyReservation.map(Release::new)),
+                Tuple.of(
+                        2,
+                        Combinators.combine(anyReservation, Arbitraries.of(EndReason.class))
+                                .as(Release::new)),
                 Tuple.of(1, Arbitraries.just(new Sweep())),
                 Tuple.of(
                         2,
@@ -124,7 +127,7 @@ class InventoryInvariantProperties {
 
     record Confirm(int reservation) implements Operation {}
 
-    record Release(int reservation) implements Operation {}
+    record Release(int reservation, EndReason reason) implements Operation {}
 
     record Sweep() implements Operation {}
 
@@ -168,9 +171,9 @@ class InventoryInvariantProperties {
                         confirm(index % reservations.size());
                     }
                 }
-                case Release(int index) -> {
+                case Release(int index, EndReason reason) -> {
                     if (!reservations.isEmpty()) {
-                        release(index % reservations.size());
+                        release(index % reservations.size(), reason);
                     }
                 }
                 case Sweep() -> sweep();
@@ -189,16 +192,16 @@ class InventoryInvariantProperties {
 
         private void confirm(int index) {
             switch (reservations.get(index).confirm(now)) {
-                case ConfirmOutcome.Confirmed(Reservation confirmed) -> reservations.set(index, confirmed);
-                case ConfirmOutcome.HoldElapsed(Reservation expired) -> end(index, expired);
+                case ConfirmOutcome.Confirmed(Transition confirmation) -> reservations.set(index, confirmation.to());
+                case ConfirmOutcome.HoldElapsed(Transition expiry) -> end(index, expiry);
                 case ConfirmOutcome.AlreadyConfirmed() -> {}
                 case ConfirmOutcome.NoLongerHeld(ReservationStatus status) -> {}
             }
         }
 
-        private void release(int index) {
-            switch (reservations.get(index).release()) {
-                case ReleaseOutcome.Released(Reservation released) -> end(index, released);
+        private void release(int index, EndReason reason) {
+            switch (reservations.get(index).release(reason)) {
+                case ReleaseOutcome.Released(Transition release) -> end(index, release);
                 case ReleaseOutcome.AlreadyEnded(ReservationStatus status) -> {}
             }
         }
@@ -206,7 +209,7 @@ class InventoryInvariantProperties {
         private void sweep() {
             for (int i = 0; i < reservations.size(); i++) {
                 Reservation reservation = reservations.get(i);
-                if (reservation.status() == ReservationStatus.HELD && reservation.isElapsedAt(now)) {
+                if (reservation.isHeldPast(now)) {
                     end(i, reservation.expire(now));
                 }
             }
@@ -220,10 +223,13 @@ class InventoryInvariantProperties {
             }
         }
 
-        /** A reservation stopped holding stock: its units go back on sale. */
-        private void end(int index, Reservation ended) {
-            reservations.set(index, ended);
-            ended.lines().forEach(line -> changeReserved(line.sku(), -line.quantity()));
+        /** A reservation stopped holding stock: its units go back on sale, once. */
+        private void end(int index, Transition ending) {
+            assertThat(reservations.get(index))
+                    .as("a transition leaves the current state")
+                    .isEqualTo(ending.from());
+            reservations.set(index, ending.to());
+            ending.to().lines().forEach(line -> changeReserved(line.sku(), -line.quantity()));
         }
 
         private void changeReserved(Sku sku, int change) {

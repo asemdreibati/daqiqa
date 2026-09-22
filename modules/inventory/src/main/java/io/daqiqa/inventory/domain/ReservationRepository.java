@@ -2,10 +2,8 @@ package io.daqiqa.inventory.domain;
 
 import io.daqiqa.kernel.ReservationId;
 import java.time.Instant;
-import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
-import org.jspecify.annotations.Nullable;
 
 /** Outbound port: reservations and their lines. Implemented by a persistence adapter. */
 public interface ReservationRepository {
@@ -33,8 +31,12 @@ public interface ReservationRepository {
     List<Reservation> lockElapsedHolds(Instant now, int limit);
 
     /**
-     * Records the status each reservation now has, with the reason for reservations that ended (released or expired)
-     * and none for confirmed ones.
+     * Records transitions: each reservation's new status and end reason. A transition is applied only while its
+     * reservation is still in the status the transition leaves, so a transition applied twice (a release returning its
+     * stock twice, say) fails loudly instead of quietly corrupting the books.
+     *
+     * @throws IllegalStateException if some reservation is not in the status its transition leaves; the transaction
+     *     must roll back
      */
-    void updateStatus(Collection<Reservation> reservations, @Nullable String releaseReason, Instant now);
+    void apply(List<Transition> transitions, Instant now);
 }

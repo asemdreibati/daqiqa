@@ -11,6 +11,7 @@ import io.daqiqa.inventory.api.Shortage;
 import io.daqiqa.inventory.application.InventoryMetrics.ExpiryTrigger;
 import io.daqiqa.inventory.application.InventoryMetrics.ReserveOutcome;
 import io.daqiqa.inventory.domain.ConfirmOutcome;
+import io.daqiqa.inventory.domain.EndReason;
 import io.daqiqa.inventory.domain.HeldUnits;
 import io.daqiqa.inventory.domain.ReleaseOutcome;
 import io.daqiqa.inventory.domain.Reservation;
@@ -19,6 +20,7 @@ import io.daqiqa.inventory.domain.ReservationStatus;
 import io.daqiqa.inventory.domain.Shortfall;
 import io.daqiqa.inventory.domain.StockLevelRepository;
 import io.daqiqa.inventory.domain.StoreStock;
+import io.daqiqa.inventory.domain.Transition;
 import io.daqiqa.kernel.Ids;
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.SkuQuantity;
@@ -143,16 +145,15 @@ public class ReservationService implements InventoryReservations {
         Reservation reservation = lockExisting(reservationId);
         Instant now = Timestamps.now(clock);
         switch (reservation.confirm(now)) {
-            case ConfirmOutcome.Confirmed(Reservation confirmed) ->
-                reservations.updateStatus(List.of(confirmed), null, now);
+            case ConfirmOutcome.Confirmed(Transition confirmation) -> reservations.apply(List.of(confirmation), now);
             case ConfirmOutcome.AlreadyConfirmed() -> log.debug("Reservation {} was already confirmed", reservationId);
-            case ConfirmOutcome.HoldElapsed(Reservation expired) -> {
-                expire(List.of(expired), now, ExpiryTrigger.LATE_CONFIRM);
+            case ConfirmOutcome.HoldElapsed(Transition expiry) -> {
+                expire(List.of(expiry), now, ExpiryTrigger.LATE_CONFIRM);
                 log.info(
                         "Refused to confirm reservation {}: its hold ran out at {}; the stock is back on sale",
                         reservationId,
-                        expired.expiresAt());
-                throw noLongerHeld(reservationId, expired.status());
+                        reservation.expiresAt());
+                throw noLongerHeld(reservationId, expiry.to().status());
             }
             case ConfirmOutcome.NoLongerHeld(ReservationStatus status) -> throw noLongerHeld(reservationId, status);
         }
@@ -171,11 +172,11 @@ public class ReservationService implements InventoryReservations {
     @Transactional
     public void release(ReservationId reservationId, ReleaseReason reason) {
         Reservation reservation = lockExisting(reservationId);
-        switch (reservation.release()) {
-            case ReleaseOutcome.Released(Reservation released) -> {
+        switch (reservation.release(endReasonFor(reason))) {
+            case ReleaseOutcome.Released(Transition release) -> {
                 Instant now = Timestamps.now(clock);
-                stockLevels.release(HeldUnits.heldBy(List.of(released)), now);
-                reservations.updateStatus(List.of(released), reason.name(), now);
+                stockLevels.release(HeldUnits.heldBy(List.of(release.to())), now);
+                reservations.apply(List.of(release), now);
                 metrics.released(reason);
             }
             case ReleaseOutcome.AlreadyEnded(ReservationStatus status) ->
@@ -193,18 +194,19 @@ public class ReservationService implements InventoryReservations {
      */
     @Transactional
     public int expireElapsedHolds(Instant now, int limit) {
-        List<Reservation> expired = reservations.lockElapsedHolds(now, limit).stream()
+        List<Transition> expiries = reservations.lockElapsedHolds(now, limit).stream()
                 .map(reservation -> reservation.expire(now))
                 .toList();
-        if (!expired.isEmpty()) {
-            expire(expired, now, ExpiryTrigger.SWEEPER);
+        if (!expiries.isEmpty()) {
+            expire(expiries, now, ExpiryTrigger.SWEEPER);
         }
-        return expired.size();
+        return expiries.size();
     }
 
-    private void expire(List<Reservation> expired, Instant now, ExpiryTrigger trigger) {
+    private void expire(List<Transition> expiries, Instant now, ExpiryTrigger trigger) {
+        List<Reservation> expired = expiries.stream().map(Transition::to).toList();
         stockLevels.release(HeldUnits.heldBy(expired), now);
-        reservations.updateStatus(expired, ReleaseReason.EXPIRED.name(), now);
+        reservations.apply(expiries, now);
         expired.forEach(reservation -> outbox.append(expiredEvent(reservation, now)));
         metrics.expired(expired.size(), trigger);
     }
@@ -225,6 +227,17 @@ public class ReservationService implements InventoryReservations {
         return new ReservationResult.Rejected(shortfalls.stream()
                 .map(shortfall -> new Shortage(shortfall.sku(), shortfall.requested(), shortfall.available()))
                 .toList());
+    }
+
+    /** Exhaustive on purpose: a reason added to the API does not compile until the domain knows it too. */
+    private static EndReason endReasonFor(ReleaseReason reason) {
+        return switch (reason) {
+            case ORDER_CANCELLED -> EndReason.ORDER_CANCELLED;
+            case PAYMENT_FAILED -> EndReason.PAYMENT_FAILED;
+            case ORDER_ABANDONED -> EndReason.ORDER_ABANDONED;
+            case EXPIRED -> EndReason.EXPIRED;
+            case OPERATOR -> EndReason.OPERATOR;
+        };
     }
 
     private static ReservationNoLongerHeldException noLongerHeld(ReservationId id, ReservationStatus status) {

@@ -6,9 +6,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 
 import io.daqiqa.inventory.domain.ConfirmOutcome;
+import io.daqiqa.inventory.domain.EndReason;
 import io.daqiqa.inventory.domain.ReleaseOutcome;
 import io.daqiqa.inventory.domain.Reservation;
 import io.daqiqa.inventory.domain.ReservationStatus;
+import io.daqiqa.inventory.domain.Transition;
 import io.daqiqa.inventory.support.InventoryTables.ReservationRow;
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.Sku;
@@ -65,8 +67,7 @@ class JdbcReservationRepositoryTest extends PostgresRepositoryTest {
     void aReferenceCanReserveAgainOnceItsReservationEnded() {
         Reservation first = hold("order-1", new SkuQuantity(MILK, 2));
         repository.insertIfReferenceFree(first, NOW);
-        Reservation released = ((ReleaseOutcome.Released) first.release()).released();
-        repository.updateStatus(List.of(released), "ORDER_CANCELLED", NOW);
+        repository.apply(List.of(release(first, EndReason.ORDER_CANCELLED)), NOW);
 
         Reservation again = hold("order-1", new SkuQuantity(MILK, 1));
 
@@ -145,8 +146,7 @@ class JdbcReservationRepositoryTest extends PostgresRepositoryTest {
         Reservation confirmed = expiringAt("order-5", NOW.minusSeconds(90));
         List.of(expiresSecond, expiresExactlyNow, expiresFirst, stillRunning, confirmed)
                 .forEach(reservation -> repository.insertIfReferenceFree(reservation, NOW));
-        Reservation confirmation = ((ConfirmOutcome.Confirmed) confirmed.confirm(NOW.minus(HOLD))).confirmed();
-        repository.updateStatus(List.of(confirmation), null, NOW);
+        repository.apply(List.of(((ConfirmOutcome.Confirmed) confirmed.confirm(NOW.minus(HOLD))).confirmation()), NOW);
 
         List<Reservation> elapsed = transaction.execute(status -> repository.lockElapsedHolds(NOW, 10));
         List<Reservation> firstTwo = transaction.execute(status -> repository.lockElapsedHolds(NOW, 2));
@@ -175,28 +175,59 @@ class JdbcReservationRepositoryTest extends PostgresRepositoryTest {
     }
 
     @Test
-    void recordsNewStatusesWithTheReleaseReason() {
+    void appliesTransitionsWithTheirEndReasons() {
         Reservation first = hold("order-1", new SkuQuantity(MILK, 1));
         Reservation second = hold("order-2", new SkuQuantity(MILK, 1));
         repository.insertIfReferenceFree(first, NOW);
         repository.insertIfReferenceFree(second, NOW);
 
-        repository.updateStatus(
-                List.of(first.expire(first.expiresAt()), second.expire(second.expiresAt())), "EXPIRED", NOW);
+        repository.apply(List.of(first.expire(first.expiresAt()), release(second, EndReason.PAYMENT_FAILED)), NOW);
 
         assertThat(tables.reservations())
-                .extracting(ReservationRow::status, ReservationRow::releaseReason)
-                .containsOnly(tuple("EXPIRED", "EXPIRED"));
-        assertThat(repository.findActiveByReference("order-1")).isEmpty();
+                .extracting(ReservationRow::reference, ReservationRow::status, ReservationRow::releaseReason)
+                .containsExactlyInAnyOrder(
+                        tuple("order-1", "EXPIRED", "EXPIRED"), tuple("order-2", "RELEASED", "PAYMENT_FAILED"));
+        assertThat(repository.lockById(second.id())).map(Reservation::endReason).contains(EndReason.PAYMENT_FAILED);
     }
 
     @Test
-    void refusesToRecordTheStatusOfAReservationThatDoesNotExist() {
+    void refusesToReleaseTheSameReservationTwice() {
+        Reservation hold = hold("order-1", new SkuQuantity(MILK, 1));
+        repository.insertIfReferenceFree(hold, NOW);
+        Transition release = release(hold, EndReason.ORDER_CANCELLED);
+        repository.apply(List.of(release), NOW);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> repository.apply(List.of(release), NOW))
+                .withMessageContaining("applied twice");
+        assertThatIllegalStateException()
+                .as("nor release it again for another reason")
+                .isThrownBy(() -> repository.apply(List.of(release(hold, EndReason.OPERATOR)), NOW));
+        assertThat(tables.reservation(hold.id()).releaseReason()).isEqualTo("ORDER_CANCELLED");
+    }
+
+    @Test
+    void refusesToExpireAnExpiredReservationAgain() {
+        Reservation hold = hold("order-1", new SkuQuantity(MILK, 1));
+        Reservation other = hold("order-2", new SkuQuantity(MILK, 1));
+        repository.insertIfReferenceFree(hold, NOW);
+        repository.insertIfReferenceFree(other, NOW);
+        Transition expiry = hold.expire(hold.expiresAt());
+        repository.apply(List.of(expiry), NOW);
+
+        assertThatIllegalStateException()
+                .as("a batch with one stale transition fails as a whole")
+                .isThrownBy(() -> transaction.executeWithoutResult(
+                        status -> repository.apply(List.of(other.expire(other.expiresAt()), expiry), NOW)));
+        assertThat(tables.reservation(other.id()).status()).as("rolled back").isEqualTo("HELD");
+    }
+
+    @Test
+    void refusesATransitionOfAReservationThatDoesNotExist() {
         Reservation unknown = hold("order-1", new SkuQuantity(MILK, 1));
 
         assertThatIllegalStateException()
-                .isThrownBy(() -> repository.updateStatus(
-                        List.of(((ReleaseOutcome.Released) unknown.release()).released()), "OPERATOR", NOW));
+                .isThrownBy(() -> repository.apply(List.of(release(unknown, EndReason.OPERATOR)), NOW));
     }
 
     @Test
@@ -204,12 +235,16 @@ class JdbcReservationRepositoryTest extends PostgresRepositoryTest {
         Reservation hold = hold("order-1", new SkuQuantity(MILK, 1));
         repository.insertIfReferenceFree(hold, NOW);
 
-        assertThatThrownBy(() -> repository.updateStatus(
-                        List.of(((ReleaseOutcome.Released) hold.release()).released()), null, NOW))
+        assertThatThrownBy(() -> jdbc.sql("UPDATE inventory.reservation SET status = 'RELEASED'")
+                        .update())
                 .hasMessageContaining("reservation_reason_iff_ended");
         assertThat(repository.findActiveByReference("order-1"))
                 .map(Reservation::status)
                 .contains(ReservationStatus.HELD);
+    }
+
+    private static Transition release(Reservation reservation, EndReason reason) {
+        return ((ReleaseOutcome.Released) reservation.release(reason)).release();
     }
 
     private static Reservation hold(String reference, SkuQuantity... lines) {

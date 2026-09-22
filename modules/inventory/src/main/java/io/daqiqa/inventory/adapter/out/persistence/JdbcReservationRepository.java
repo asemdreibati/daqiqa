@@ -2,9 +2,11 @@ package io.daqiqa.inventory.adapter.out.persistence;
 
 import static io.daqiqa.inventory.adapter.out.persistence.SqlValues.timestamp;
 
+import io.daqiqa.inventory.domain.EndReason;
 import io.daqiqa.inventory.domain.Reservation;
 import io.daqiqa.inventory.domain.ReservationRepository;
 import io.daqiqa.inventory.domain.ReservationStatus;
+import io.daqiqa.inventory.domain.Transition;
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.Sku;
 import io.daqiqa.kernel.SkuQuantity;
@@ -14,12 +16,12 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -28,7 +30,7 @@ import org.springframework.stereotype.Repository;
 class JdbcReservationRepository implements ReservationRepository {
 
     private static final String SELECT_WITH_LINES = """
-            SELECT r.id, r.store_id, r.reference, r.status, r.expires_at, l.sku, l.quantity
+            SELECT r.id, r.store_id, r.reference, r.status, r.expires_at, r.release_reason, l.sku, l.quantity
               FROM inventory.reservation AS r
               JOIN inventory.reservation_line AS l ON l.reservation_id = r.id""";
 
@@ -54,14 +56,15 @@ class JdbcReservationRepository implements ReservationRepository {
         // and this one belongs to the caller. The conflict target names the partial index by its predicate.
         int inserted = jdbc.sql("""
                         INSERT INTO inventory.reservation
-                               (id, store_id, reference, status, expires_at, created_at, updated_at)
-                        VALUES (:id, :storeId, :reference, :status, :expiresAt, :now, :now)
+                               (id, store_id, reference, status, expires_at, release_reason, created_at, updated_at)
+                        VALUES (:id, :storeId, :reference, :status, :expiresAt, :releaseReason, :now, :now)
                         ON CONFLICT (reference) WHERE status IN ('HELD', 'CONFIRMED') DO NOTHING""")
                 .param("id", reservation.id().value())
                 .param("storeId", reservation.storeId().value())
                 .param("reference", reservation.reference())
                 .param("status", reservation.status().name())
                 .param("expiresAt", timestamp(reservation.expiresAt()))
+                .param("releaseReason", name(reservation.endReason()), Types.VARCHAR)
                 .param("now", timestamp(now))
                 .update();
         if (inserted == 0) {
@@ -104,13 +107,13 @@ class JdbcReservationRepository implements ReservationRepository {
         // not to their lines. The scan is the partial index on expires_at WHERE status = 'HELD'.
         return jdbc.sql("""
                         WITH elapsed AS MATERIALIZED (
-                            SELECT id, store_id, reference, status, expires_at
+                            SELECT id, store_id, reference, status, expires_at, release_reason
                               FROM inventory.reservation
                              WHERE status = 'HELD' AND expires_at <= :now
                              ORDER BY expires_at
                              LIMIT :limit
                                FOR UPDATE SKIP LOCKED)
-                        SELECT r.id, r.store_id, r.reference, r.status, r.expires_at, l.sku, l.quantity
+                        SELECT r.id, r.store_id, r.reference, r.status, r.expires_at, r.release_reason, l.sku, l.quantity
                           FROM elapsed AS r
                           JOIN inventory.reservation_line AS l ON l.reservation_id = r.id
                          ORDER BY r.expires_at, r.id, l.sku""")
@@ -120,26 +123,41 @@ class JdbcReservationRepository implements ReservationRepository {
     }
 
     @Override
-    public void updateStatus(Collection<Reservation> reservations, @Nullable String releaseReason, Instant now) {
-        if (reservations.isEmpty()) {
+    public void apply(List<Transition> transitions, Instant now) {
+        if (transitions.isEmpty()) {
             return;
         }
+        // Guarded by the status each transition leaves: a transition applied twice (or racing a change nobody locked
+        // against) matches no row, and the count check below fails the transaction before stock is returned twice.
         int updated = jdbc.sql("""
                         UPDATE inventory.reservation AS r
-                           SET status = u.status, release_reason = :releaseReason, updated_at = :now
-                          FROM unnest(CAST(:ids AS uuid[]), :statuses) AS u(id, status)
-                         WHERE r.id = u.id""")
-                .param("ids", reservations.stream().map(r -> r.id().toString()).toArray(String[]::new))
+                           SET status = t.to_status, release_reason = t.end_reason, updated_at = :now
+                          FROM unnest(CAST(:ids AS uuid[]), :fromStatuses, :toStatuses, :endReasons)
+                               AS t(id, from_status, to_status, end_reason)
+                         WHERE r.id = t.id
+                           AND r.status = t.from_status""")
                 .param(
-                        "statuses",
-                        reservations.stream().map(r -> r.status().name()).toArray(String[]::new))
-                .param("releaseReason", releaseReason, Types.VARCHAR)
+                        "ids",
+                        transitions.stream().map(t -> t.from().id().toString()).toArray(String[]::new))
+                .param("fromStatuses", statuses(transitions.stream().map(Transition::from)))
+                .param("toStatuses", statuses(transitions.stream().map(Transition::to)))
+                .param(
+                        "endReasons",
+                        transitions.stream().map(t -> name(t.to().endReason())).toArray(String[]::new))
                 .param("now", timestamp(now))
                 .update();
-        if (updated != reservations.size()) {
-            throw new IllegalStateException(
-                    "Updated " + updated + " of " + reservations.size() + " reservations: some do not exist");
+        if (updated != transitions.size()) {
+            throw new IllegalStateException("Applied " + updated + " of " + transitions.size()
+                    + " reservation transitions: the others are not in the status they leave (applied twice?)");
         }
+    }
+
+    private static String[] statuses(Stream<Reservation> reservations) {
+        return reservations.map(reservation -> reservation.status().name()).toArray(String[]::new);
+    }
+
+    private static @Nullable String name(@Nullable EndReason reason) {
+        return reason == null ? null : reason.name();
     }
 
     private static Optional<Reservation> atMostOne(List<Reservation> reservations) {
@@ -156,12 +174,14 @@ class JdbcReservationRepository implements ReservationRepository {
             UUID id = rs.getObject("id", UUID.class);
             ReservationRows rows = byId.get(id);
             if (rows == null) {
+                String releaseReason = rs.getString("release_reason");
                 rows = new ReservationRows(
                         ReservationId.of(id),
                         StoreId.of(rs.getString("store_id")),
                         rs.getString("reference"),
                         ReservationStatus.valueOf(rs.getString("status")),
                         SqlValues.instant(rs, "expires_at"),
+                        releaseReason == null ? null : EndReason.valueOf(releaseReason),
                         new ArrayList<>());
                 byId.put(id, rows);
             }
@@ -176,10 +196,11 @@ class JdbcReservationRepository implements ReservationRepository {
             String reference,
             ReservationStatus status,
             Instant expiresAt,
+            @Nullable EndReason endReason,
             List<SkuQuantity> lines) {
 
         Reservation toReservation() {
-            return new Reservation(id, storeId, reference, lines, status, expiresAt);
+            return new Reservation(id, storeId, reference, lines, status, expiresAt, endReason);
         }
     }
 }

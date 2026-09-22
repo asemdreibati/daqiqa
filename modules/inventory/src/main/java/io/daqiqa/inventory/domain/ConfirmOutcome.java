@@ -4,7 +4,7 @@ package io.daqiqa.inventory.domain;
 public sealed interface ConfirmOutcome {
 
     /** HELD → CONFIRMED. */
-    record Confirmed(Reservation confirmed) implements ConfirmOutcome {}
+    record Confirmed(Transition confirmation) implements ConfirmOutcome {}
 
     /** Already confirmed: nothing to do (confirming is idempotent). */
     record AlreadyConfirmed() implements ConfirmOutcome {}
@@ -14,7 +14,7 @@ public sealed interface ConfirmOutcome {
      * stock must go back on sale and the confirmation must fail, because those units may already be promised to
      * someone else by the time the caller acts on a success.
      */
-    record HoldElapsed(Reservation expired) implements ConfirmOutcome {}
+    record HoldElapsed(Transition expiry) implements ConfirmOutcome {}
 
     /** Released or expired earlier: the confirmation must fail. */
     record NoLongerHeld(ReservationStatus status) implements ConfirmOutcome {}

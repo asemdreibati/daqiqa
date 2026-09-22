@@ -17,6 +17,7 @@ import io.daqiqa.kernel.StoreId;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -40,9 +41,10 @@ class ReservationTest {
     @Test
     void aNewHoldIsHeldUntilItsHoldTimeRunsOut() {
         assertThat(held.status()).isEqualTo(ReservationStatus.HELD);
+        assertThat(held.endReason()).isNull();
         assertThat(held.expiresAt()).isEqualTo(NOW.plus(HOLD));
-        assertThat(held.isElapsedAt(NOW.plus(HOLD).minusNanos(1))).isFalse();
-        assertThat(held.isElapsedAt(NOW.plus(HOLD))).isTrue();
+        assertThat(held.isHeldPast(NOW.plus(HOLD).minusNanos(1))).isFalse();
+        assertThat(held.isHeldPast(NOW.plus(HOLD))).isTrue();
     }
 
     @Test
@@ -74,30 +76,33 @@ class ReservationTest {
     }
 
     @Test
+    void hasAnEndReasonExactlyWhenItHasEnded() {
+        assertThatIllegalArgumentException().isThrownBy(() -> with(held, ReservationStatus.HELD, EndReason.OPERATOR));
+        assertThatIllegalArgumentException().isThrownBy(() -> with(held, ReservationStatus.RELEASED, null));
+    }
+
+    @Test
     void confirmingInTimeConfirms() {
         assertThat(held.confirm(NOW.plus(HOLD).minusMillis(1)))
-                .isInstanceOfSatisfying(
-                        Confirmed.class,
-                        confirmed -> assertThat(confirmed.confirmed())
-                                .isEqualTo(withStatus(held, ReservationStatus.CONFIRMED)));
+                .isEqualTo(new Confirmed(new Transition(held, with(held, ReservationStatus.CONFIRMED, null))));
     }
 
     @Test
     void aConfirmationAtOrAfterTheExpiryTimeExpiresTheHoldInsteadEvenBeforeTheSweeperRuns() {
-        for (Instant late : List.of(NOW.plus(HOLD), NOW.plus(HOLD).plusSeconds(1))) {
-            assertThat(held.confirm(late))
-                    .isInstanceOfSatisfying(
-                            HoldElapsed.class,
-                            elapsed -> assertThat(elapsed.expired())
-                                    .isEqualTo(withStatus(held, ReservationStatus.EXPIRED)));
-        }
+        Transition expiry = new Transition(held, with(held, ReservationStatus.EXPIRED, EndReason.EXPIRED));
+
+        assertThat(held.confirm(NOW.plus(HOLD))).isEqualTo(new HoldElapsed(expiry));
+        assertThat(held.confirm(NOW.plus(HOLD).plusSeconds(1))).isEqualTo(new HoldElapsed(expiry));
     }
 
     @Test
     void confirmingTwiceIsANoOpEvenAfterTheOriginalExpiryTime() {
-        Reservation confirmed = withStatus(held, ReservationStatus.CONFIRMED);
+        Reservation confirmed = with(held, ReservationStatus.CONFIRMED, null);
 
         assertThat(confirmed.confirm(NOW.plus(Duration.ofDays(1)))).isEqualTo(new AlreadyConfirmed());
+        assertThat(confirmed.isHeldPast(NOW.plus(Duration.ofDays(1))))
+                .as("a confirmed hold never runs out")
+                .isFalse();
     }
 
     @ParameterizedTest
@@ -105,16 +110,19 @@ class ReservationTest {
             value = ReservationStatus.class,
             names = {"RELEASED", "EXPIRED"})
     void anEndedReservationCannotBeConfirmed(ReservationStatus ended) {
-        assertThat(withStatus(held, ended).confirm(NOW)).isEqualTo(new NoLongerHeld(ended));
+        assertThat(with(held, ended, EndReason.OPERATOR).confirm(NOW)).isEqualTo(new NoLongerHeld(ended));
     }
 
     @ParameterizedTest
     @EnumSource(
             value = ReservationStatus.class,
             names = {"HELD", "CONFIRMED"})
-    void releasingPutsHeldOrConfirmedStockBackOnSale(ReservationStatus holding) {
-        assertThat(withStatus(held, holding).release())
-                .isEqualTo(new Released(withStatus(held, ReservationStatus.RELEASED)));
+    void releasingPutsHeldOrConfirmedStockBackOnSaleAndRecordsWhy(ReservationStatus holding) {
+        Reservation holdingStock = with(held, holding, null);
+
+        assertThat(holdingStock.release(EndReason.PAYMENT_FAILED))
+                .isEqualTo(new Released(new Transition(
+                        holdingStock, with(held, ReservationStatus.RELEASED, EndReason.PAYMENT_FAILED))));
     }
 
     @ParameterizedTest
@@ -122,32 +130,37 @@ class ReservationTest {
             value = ReservationStatus.class,
             names = {"RELEASED", "EXPIRED"})
     void releasingAnEndedReservationIsANoOp(ReservationStatus ended) {
-        assertThat(withStatus(held, ended).release()).isEqualTo(new AlreadyEnded(ended));
+        assertThat(with(held, ended, EndReason.ORDER_CANCELLED).release(EndReason.OPERATOR))
+                .isEqualTo(new AlreadyEnded(ended));
     }
 
     @Test
     void theSweeperExpiresOnlyHeldReservationsWhoseTimeRanOut() {
-        assertThat(held.expire(NOW.plus(HOLD))).isEqualTo(withStatus(held, ReservationStatus.EXPIRED));
+        assertThat(held.expire(NOW.plus(HOLD)))
+                .isEqualTo(new Transition(held, with(held, ReservationStatus.EXPIRED, EndReason.EXPIRED)));
         assertThatIllegalStateException()
                 .isThrownBy(() -> held.expire(NOW.plus(HOLD).minusMillis(1)));
         assertThatIllegalStateException()
-                .isThrownBy(() -> withStatus(held, ReservationStatus.CONFIRMED).expire(NOW.plus(HOLD)));
+                .isThrownBy(() -> with(held, ReservationStatus.CONFIRMED, null).expire(NOW.plus(HOLD)));
     }
 
     @Test
-    void onlyHeldAndConfirmedReservationsCountAsReservedStock() {
-        assertThat(ReservationStatus.values())
-                .filteredOn(ReservationStatus::holdsStock)
-                .containsExactly(ReservationStatus.HELD, ReservationStatus.CONFIRMED);
+    void aTransitionMovesOneReservationToAnotherStatus() {
+        Reservation other = Reservation.hold(ReservationId.newId(), MARINA, "order-2", held.lines(), NOW, HOLD);
+
+        assertThatIllegalArgumentException().isThrownBy(() -> new Transition(held, held));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new Transition(held, with(other, ReservationStatus.CONFIRMED, null)));
     }
 
-    private static Reservation withStatus(Reservation reservation, ReservationStatus status) {
+    private static Reservation with(Reservation reservation, ReservationStatus status, @Nullable EndReason reason) {
         return new Reservation(
                 reservation.id(),
                 reservation.storeId(),
                 reservation.reference(),
                 reservation.lines(),
                 status,
-                reservation.expiresAt());
+                reservation.expiresAt(),
+                reason);
     }
 }
