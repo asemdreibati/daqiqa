@@ -14,6 +14,7 @@ import io.daqiqa.inventory.support.InventoryTables.StockRow;
 import io.daqiqa.kernel.SkuQuantity;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -98,6 +99,21 @@ class ReservationExpirySweeperTest extends InventoryIntegrationTest {
         assertThat(tables.stockOf(MARINA, MILK).reserved()).isZero();
         assertThat(tables.stockOf(JLT, MILK).reserved()).isZero();
         assertThat(outbox.committedEventsOfType(ReservationExpiredV1.class)).hasSize(23);
+    }
+
+    @Test
+    void appendsItsEventsBeforeLockingTheStockRowsThatCheckoutsNeed() {
+        tables.stock(MARINA, MILK, 10);
+        reserve("order-1", Duration.ofMinutes(1), new SkuQuantity(MILK, 2));
+        reserve("order-2", Duration.ofMinutes(1), new SkuQuantity(MILK, 1));
+        clock.advance(Duration.ofMinutes(1));
+        List<Boolean> stockRowFreeDuringAppend = new CopyOnWriteArrayList<>();
+        outbox.whenAppending(event -> stockRowFreeDuringAppend.add(tables.isStockRowFree(MARINA, MILK)));
+
+        assertThat(sweeper.sweep()).isEqualTo(2);
+
+        assertThat(stockRowFreeDuringAppend).containsExactly(true, true);
+        assertThat(tables.stockOf(MARINA, MILK).reserved()).isZero();
     }
 
     private Reserved reserve(String reference, Duration holdFor, SkuQuantity... lines) {

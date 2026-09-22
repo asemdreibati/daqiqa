@@ -3,6 +3,9 @@ package io.daqiqa.inventory.support;
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.Sku;
 import io.daqiqa.kernel.StoreId;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -19,9 +22,11 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  */
 public final class InventoryTables {
 
+    private final DataSource dataSource;
     private final JdbcClient jdbc;
 
     public InventoryTables(DataSource dataSource) {
+        this.dataSource = dataSource;
         this.jdbc = JdbcClient.create(dataSource);
     }
 
@@ -52,6 +57,27 @@ public final class InventoryTables {
                 .query((rs, row) -> new StockRow(rs.getInt("on_hand"), rs.getInt("reserved"), rs.getLong("version")))
                 .optional()
                 .orElse(null);
+    }
+
+    /**
+     * Whether another transaction could lock this stock row right now, asked on a connection of its own (never the
+     * caller's transactional one) and without waiting.
+     */
+    public boolean isStockRowFree(StoreId store, Sku sku) {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement lock = connection.prepareStatement(
+                        "SELECT 1 FROM inventory.stock_level WHERE store_id = ? AND sku = ? FOR UPDATE NOWAIT")) {
+            connection.setAutoCommit(true);
+            lock.setString(1, store.value());
+            lock.setString(2, sku.value());
+            lock.executeQuery().close();
+            return true;
+        } catch (SQLException e) {
+            if ("55P03".equals(e.getSQLState())) { // lock_not_available
+                return false;
+            }
+            throw new IllegalStateException(e);
+        }
     }
 
     public List<ReservationRow> reservations() {

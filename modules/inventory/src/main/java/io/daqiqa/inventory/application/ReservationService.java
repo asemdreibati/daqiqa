@@ -175,8 +175,8 @@ public class ReservationService implements InventoryReservations {
         switch (reservation.release(endReasonFor(reason))) {
             case ReleaseOutcome.Released(Transition release) -> {
                 Instant now = Timestamps.now(clock);
-                stockLevels.release(HeldUnits.heldBy(List.of(release.to())), now);
                 reservations.apply(List.of(release), now);
+                stockLevels.release(HeldUnits.heldBy(List.of(release.to())), now); // hot rows last, see expire()
                 metrics.released(reason);
             }
             case ReleaseOutcome.AlreadyEnded(ReservationStatus status) ->
@@ -203,11 +203,20 @@ public class ReservationService implements InventoryReservations {
         return expiries.size();
     }
 
+    /**
+     * Ends holds that ran out: status, event, stock back on sale.
+     *
+     * <p>The order keeps the hot stock rows (every checkout of those SKUs needs them) locked for as short a time as
+     * possible: they are locked last, just before the commit. The guarded status update comes first. It touches only
+     * reservation rows this transaction already holds, and a stale transition fails there before any other work. The
+     * events come next: the outbox is an append-only table nobody else waits on. The lock order stays the global one:
+     * reservation rows, then stock rows by store and SKU.
+     */
     private void expire(List<Transition> expiries, Instant now, ExpiryTrigger trigger) {
-        List<Reservation> expired = expiries.stream().map(Transition::to).toList();
-        stockLevels.release(HeldUnits.heldBy(expired), now);
         reservations.apply(expiries, now);
+        List<Reservation> expired = expiries.stream().map(Transition::to).toList();
         expired.forEach(reservation -> outbox.append(expiredEvent(reservation, now)));
+        stockLevels.release(HeldUnits.heldBy(expired), now);
         metrics.expired(expired.size(), trigger);
     }
 
