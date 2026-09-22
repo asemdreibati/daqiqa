@@ -8,7 +8,10 @@ build/
 .idea/
 *.iml
 .vscode/
-out/
+/out/
+
+# Test tooling
+.jqwik-database
 
 # OS / misc
 .DS_Store
