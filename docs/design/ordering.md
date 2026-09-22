@@ -215,11 +215,12 @@ problem handler only maps validation failures, key misuse, the in-progress answe
    payment, so only card orders are ever abandoned.)
 9. **A promise buys at most one live order.** A partial unique index on `customer_order (promise_id) WHERE status IN
    ('AWAITING_PAYMENT', 'CONFIRMED')` enforces it; the insert uses `ON CONFLICT ... DO NOTHING`. A second order under
-   the same promise with another key gets `409 PROMISE_ALREADY_USED`, stored and replayed like every refusal. The check
-   runs twice: once before holding stock, so that a sequential second order is told the truth rather than
-   `OUT_OF_STOCK` (the first order holds the items), and once at the insert, which settles a race between keys; the
-   loser's T1 rolls back, its stock hold included, and the refusal is stored under its key in a new T1. An order whose
-   payment failed or that was abandoned does not block the promise, which may be used again while it is valid.
+   the same promise with another key gets `409 PROMISE_ALREADY_USED`, stored and replayed like every refusal. T1 takes
+   a per-promise advisory lock before it checks (`lockPromise`), so checkouts racing under one promise line up: each
+   latecomer waits for the first one's transaction and then sees its order, rather than finding its items held and
+   being told `OUT_OF_STOCK`. The check is made before any stock is held, and the insert settles anything the lock did
+   not; a loser's T1 rolls back, its stock hold included, and the refusal is stored under its key in a new T1. An order
+   whose payment failed or that was abandoned does not block the promise, which may be used again while it is valid.
 10. **The promise is verified against the delivery address and the store** (`PromiseTokenVerifier.verify(token, lines,
     deliveryLocation)`): `LOCATION_MISMATCH` → `422 PROMISE_LOCATION_MISMATCH`, `STORE_UNAVAILABLE` →
     `409 STORE_UNAVAILABLE` (nothing is wrong with the request; the store stopped taking orders). Both are stored and
@@ -238,8 +239,15 @@ problem handler only maps validation failures, key misuse, the in-progress answe
 13. **The sweeper abandons each order in its own short transaction**, locking it with `FOR UPDATE SKIP LOCKED` (instead
     of one transaction for the whole batch): an order a checkout is settling is skipped, never waited for, and one order
     whose release fails is counted (`daqiqa.ordering.sweeper.failures`) and retried next sweep instead of rolling back
-    and blocking the rest of the batch forever. The sweeper does not touch idempotency keys: the checkout that owns the
-    key answers `HOLD_EXPIRED` when it finds the order abandoned.
+    and blocking the rest of the batch forever. **It waits for nobody**: releasing the stock takes locks it does not
+    control (the inventory locks the store's stock rows, which a burst of checkouts holds), so each transaction caps its
+    lock wait at `daqiqa.ordering.sweeper.lock-timeout` (500 ms, `SET LOCAL lock_timeout`, tighter than the server's
+    3 s per connection and undone with the transaction). A wait that runs out, a
+    broken deadlock or a lost concurrent write — SQLState `55P03`, `40P01` or `40001` anywhere in the cause chain, which
+    is where they stay because Spring translates only some of them — is contention, not a fault: that order is given up
+    for this round, counted apart (`daqiqa.ordering.sweeper.contention`), logged at INFO, and abandoned by the next
+    sweep. The sweeper does not touch idempotency keys: the checkout that owns the key answers `HOLD_EXPIRED` when it
+    finds the order abandoned.
 14. **Timestamps are truncated to milliseconds** when an order is placed: PostgreSQL and JSON both keep them exactly, so
     the `201` body and a later `GET` are byte-identical (tested).
 15. **The domain keeps the delivery tier as text.** The promise context owns the tiers; an order records which one it
@@ -257,8 +265,15 @@ problem handler only maps validation failures, key misuse, the in-progress answe
     (`... AND published_at IS NULL`, so every hot statement repeats the partial index's predicate and uses it; a test
     checks the plans). A failed event is retried after a backoff that doubles per attempt (`next_attempt_at`; 1 s up to
     5 min), and while it waits nothing after it is published; its failures are logged at WARN on attempts 1, 2, 4, 8,
-    ..., at DEBUG otherwise. The logging publisher logs the envelope only: payloads carry a delivery location, which is
-    personal data. The backlog gauge is read at scrape time from the partial index on unpublished rows.
+    ..., at DEBUG otherwise. **A round is time-boxed**: publication happens inside the transaction that locked the
+    batch, which is what makes "published" and "marked published" agree, so a slow but working broker could hold that
+    transaction open for `batch-size` times the send timeout — and a long transaction holds `VACUUM` back across the
+    whole database, hot tables such as `inventory.stock_level` included. Once
+    `daqiqa.messaging.relay.max-batch-duration` (2 s) is used up, the round stops starting publications, marks what it
+    published and commits; the rest follows in the next round, and the transaction stays open for about the budget plus
+    one send timeout. A round always publishes at least one event, so the smallest budget still makes progress. The
+    logging publisher logs the envelope only: payloads carry a delivery location, which is personal data. The backlog
+    gauge is read at scrape time from the partial index on unpublished rows.
 18. **Kafka is the default publisher, and only an explicitly durable producer is accepted** (a deviation from the
     specification, which made `logging` the default). A deployment that forgets the setting must not mark events
     published that went nowhere; `daqiqa.messaging.publisher=logging` is an explicit opt-in for local runs. The Kafka
@@ -288,6 +303,7 @@ the broker acknowledged but before its round committed publishes those events ag
 | `daqiqa.messaging.publisher` | `kafka` | `kafka`, or `logging` as an explicit opt-in for local runs; selects the `EventPublisher` bean |
 | `daqiqa.messaging.relay.interval` | `250ms` | pause between relay rounds |
 | `daqiqa.messaging.relay.batch-size` | `100` | events per round at most |
+| `daqiqa.messaging.relay.max-batch-duration` | `2s` | how long a round may keep starting publications before it commits what it has |
 | `daqiqa.messaging.relay.initial-backoff` / `.max-backoff` | `1s` / `5m` | wait before retrying a failed event, doubled per attempt, capped |
 | `daqiqa.messaging.retention` | `7d` | published events are deleted after this |
 | `daqiqa.messaging.purge.interval` / `.batch-size` | `1h` / `1000` | how often and in what batches |
@@ -297,6 +313,7 @@ the broker acknowledged but before its round committed publishes those events ag
 | `daqiqa.ordering.idempotency.retention` | `24h` | how long keys and responses are kept |
 | `daqiqa.ordering.idempotency.purge-interval` / `.purge-batch-size` | `1h` / `1000` | key purge |
 | `daqiqa.ordering.sweeper.interval` / `.batch-size` | `30s` / `100` | abandoned-order sweeper |
+| `daqiqa.ordering.sweeper.lock-timeout` | `500ms` | how long one order's sweep waits for a lock before giving that order up for this round |
 | `daqiqa.ordering.payment.decline-above` | `1000.00` | simulated gateway declines amounts above this (major units) |
 | `daqiqa.ordering.payment.latency` | `0s` | simulated gateway delay |
 
@@ -336,6 +353,7 @@ daqiqa:
 | `daqiqa.ordering.checkout` | timer, `outcome` | how long each kind takes, payment included |
 | `daqiqa.ordering.abandoned` | counter, `reason` | card orders abandoned, counted once committed wherever it happens: `hold_expired` (payment never completed), `paid_after_hold_expired` (an authorization to void certainly exists) |
 | `daqiqa.ordering.sweeper.failures` | counter | orders the sweeper could not abandon (retried) |
+| `daqiqa.ordering.sweeper.contention` | counter | orders the sweeper gave up on because their rows were locked (retried): normal under load, a sign of a stuck holder when it stays high |
 | `daqiqa.outbox.backlog` | gauge | committed events not yet published: alert when it grows |
 | `daqiqa.outbox.published` / `daqiqa.outbox.failures` | counters, `type` | publications and failed attempts per event type |
 
@@ -349,6 +367,7 @@ daqiqa:
 | Only one relay at a time; two concurrent relays never publish a row twice, and keep the order | `OutboxRelayTest.skipsTheRound...`, `twoRelaysRunningConcurrently...` |
 | At-least-once: a relay dying before commit publishes again, loses nothing | `OutboxRelayTest.anEventIsPublishedAgain...` |
 | The relay's statements and the backlog gauge use the partial index | `OutboxQueryPlanTest` (`EXPLAIN`) |
+| A slow broker cannot keep the round's transaction open: the budget stops it and what was published is kept; a round always publishes at least one event | `OutboxRelayTest.stopsTakingNewEvents...`, `publishesOneEventPerRound...` |
 | Kafka: key = store, payload, CloudEvents headers, one partition per store in order; acks awaited | `OutboxToKafkaTest` (`@EmbeddedKafka`) |
 | Kafka is the default; logging only when asked; a producer that is not explicitly durable, or could stall the relay, is refused with every missing setting named; unacknowledged sends fail | `PublisherSelectionTest`, `KafkaEventPublisherTest` (no broker) |
 | Retention deletes only old published events | `OutboxPurgeTest` |
@@ -362,6 +381,7 @@ daqiqa:
 | **20 identical requests in parallel → one order, one reservation, one charge, one event; answers are the 201 or `IN_PROGRESS`; 20 concurrent retries all replay** | `CheckoutConcurrencyTest` (repeated 3×) |
 | A promise buys one live order: 8 keys racing under one promise → one order, the others `PROMISE_ALREADY_USED` holding no stock; the loser of the insert race gives its hold back; a failed order frees the promise | `CheckoutConcurrencyTest`, `CheckoutServiceTest.refusesASecondOrder...`, `aPromiseWhoseOrderFailed...`, `JdbcOrderRepositoryTest` |
 | Sweeper: abandons after the hold, releases stock, announces it, skips locked orders, isolates failures | `AbandonedOrderSweeperTest` |
+| Sweeper under contention: with the order's rows held by another connection, the sweep gives up without an error or half-done work, counts it apart, and abandons the order on the next sweep | `AbandonedOrderSweeperTest.givesUpOnAnOrderWhoseStockRows...` (a real lock, a real `lock_timeout`) |
 | Round trips, lost-update guard, `SKIP LOCKED`, CHECK constraints, the promise index, byte-exact response storage | `JdbcOrderRepositoryTest`, `JdbcIdempotencyKeyRepositoryTest` |
 | Wire contract: status codes, problem codes, `Location`, `Retry-After` (capped at 2 s), missing key → 400 | `OrderControllerTest` (`@WebMvcTest`) |
 | Replays are byte-identical over HTTP; `GET` returns the `201` body; stored problems look like Spring's | `CheckoutHttpTest` |
@@ -380,9 +400,14 @@ point so that interleavings are reproduced, not hoped for.
   authorization is made under an order that exists, and every such order ends confirmed, declined or announced as
   abandoned, so nothing else checkout leaves behind needs voiding. The simulated gateway holds no money, so v1 is
   unaffected; a real provider must not go live without it.
-- **Relay throughput**: publishing is sequential (about 1/ack-latency events per second, a few hundred per second with
-  a local cluster). Next: pipeline each batch's sends and await them in order (the idempotent producer keeps
-  per-partition order), or move to Debezium CDC on the same table (ADR-0009).
+- **Head-of-line blocking is the trade-off that remains**, and it is deliberate: one ordered stream through one relay
+  means an event that cannot be published stops every store's events, not only its own, and throughput is one event per
+  acknowledgement (a few hundred per second with a local cluster). That is the price of per-key order with a single
+  queue; the time box bounds the transaction, not the blocking. Getting past it needs another design, not a bigger
+  batch: a lease-based relay that claims a range of `seq` values, commits, publishes outside the transaction and marks
+  the range afterwards (at the cost of republishing an acknowledged event after a crash, which consumers already
+  tolerate), partitioned per topic or key range so one bad event blocks only its own partition, or change data capture
+  on the same table (ADR-0009).
 - **Poison events** block the relay by design (order first), now with backoff and throttled logs; still to add: alerts
   on `daqiqa.outbox.failures` and on backlog age, and an operator command to park an event.
 - React to `ReservationExpiredV1` (abandon the order immediately instead of waiting for the sweeper), cancellation
