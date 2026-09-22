@@ -72,6 +72,11 @@ public record Reservation(
         return new Reservation(id, storeId, reference, lines, ReservationStatus.HELD, now.plus(holdFor), null);
     }
 
+    /** The stock rows this reservation holds units of. */
+    public List<StockKey> stockKeys() {
+        return lines.stream().map(line -> new StockKey(storeId, line.sku())).toList();
+    }
+
     /**
      * Whether this is a hold whose time ran out at {@code now}: from {@code expiresAt} on, it can no longer be
      * confirmed and must expire, whether or not the sweeper has got to it yet.

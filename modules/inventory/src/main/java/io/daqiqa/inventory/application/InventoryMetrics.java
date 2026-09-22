@@ -34,7 +34,9 @@ class InventoryMetrics {
         /** The scheduled sweep found the hold elapsed. */
         SWEEPER,
         /** A confirmation arrived after the hold had elapsed (payment slower than the hold, typically). */
-        LATE_CONFIRM
+        LATE_CONFIRM,
+        /** A retried reservation found its reference's hold elapsed before the sweeper did. */
+        REPLAY
     }
 
     private final Map<ReserveOutcome, Counter> reservations;

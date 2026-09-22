@@ -3,6 +3,7 @@ package io.daqiqa.inventory.adapter.out.persistence;
 import static io.daqiqa.inventory.adapter.out.persistence.SqlValues.timestamp;
 
 import io.daqiqa.inventory.domain.HeldUnits;
+import io.daqiqa.inventory.domain.StockKey;
 import io.daqiqa.inventory.domain.StockLevel;
 import io.daqiqa.inventory.domain.StockLevelRepository;
 import io.daqiqa.inventory.domain.StoreStock;
@@ -106,26 +107,18 @@ class JdbcStockLevelRepository implements StockLevelRepository {
     }
 
     @Override
+    public void lockForUpdate(Collection<StockKey> keys) {
+        lock(keys);
+    }
+
+    @Override
     public void release(List<HeldUnits> units, Instant now) {
         if (units.isEmpty()) {
             return;
         }
-        String[] storeIds = units.stream().map(held -> held.storeId().value()).toArray(String[]::new);
-        String[] skus = units.stream().map(held -> held.sku().value()).toArray(String[]::new);
         // Lock first, in (store, SKU) order: an UPDATE locks rows in whatever order its plan visits them, and could
         // deadlock with a reservation locking the same rows in SKU order.
-        int locked = jdbc.sql("""
-                        SELECT s.store_id
-                          FROM inventory.stock_level AS s
-                          JOIN unnest(:storeIds, :skus) AS u(store_id, sku)
-                            ON s.store_id = u.store_id AND s.sku = u.sku
-                         ORDER BY s.store_id, s.sku
-                           FOR UPDATE OF s""")
-                .param("storeIds", storeIds)
-                .param("skus", skus)
-                .query(String.class)
-                .list()
-                .size();
+        int locked = lock(units.stream().map(HeldUnits::key).toList());
         int updated = jdbc.sql("""
                         UPDATE inventory.stock_level AS s
                            SET reserved = s.reserved - u.quantity, version = s.version + 1, updated_at = :now
@@ -133,8 +126,10 @@ class JdbcStockLevelRepository implements StockLevelRepository {
                          WHERE s.store_id = u.store_id
                            AND s.sku = u.sku
                            AND s.reserved >= u.quantity""")
-                .param("storeIds", storeIds)
-                .param("skus", skus)
+                .param(
+                        "storeIds",
+                        units.stream().map(held -> held.storeId().value()).toArray(String[]::new))
+                .param("skus", units.stream().map(held -> held.sku().value()).toArray(String[]::new))
                 .param(
                         "quantities",
                         units.stream().mapToInt(HeldUnits::quantity).toArray())
@@ -144,6 +139,29 @@ class JdbcStockLevelRepository implements StockLevelRepository {
             throw new IllegalStateException("Could return only " + updated + " of " + units.size()
                     + " held quantities to sale (" + locked + " stock rows found): reserved stock is inconsistent");
         }
+    }
+
+    /** Locks the existing rows of {@code keys} in (store, SKU) order, in one statement; returns how many exist. */
+    private int lock(Collection<StockKey> keys) {
+        List<StockKey> rows = keys.stream().distinct().sorted().toList();
+        if (rows.isEmpty()) {
+            return 0;
+        }
+        // ORDER BY is applied before FOR UPDATE takes the locks, so rows are locked in the global order.
+        return jdbc.sql("""
+                        SELECT s.store_id
+                          FROM inventory.stock_level AS s
+                          JOIN unnest(:storeIds, :skus) AS k(store_id, sku)
+                            ON s.store_id = k.store_id AND s.sku = k.sku
+                         ORDER BY s.store_id, s.sku
+                           FOR UPDATE OF s""")
+                .param(
+                        "storeIds",
+                        rows.stream().map(key -> key.storeId().value()).toArray(String[]::new))
+                .param("skus", rows.stream().map(key -> key.sku().value()).toArray(String[]::new))
+                .query(String.class)
+                .list()
+                .size();
     }
 
     @Override

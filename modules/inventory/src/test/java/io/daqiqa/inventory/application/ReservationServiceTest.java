@@ -15,6 +15,7 @@ import io.daqiqa.inventory.domain.ReservationRepository;
 import io.daqiqa.inventory.domain.StockLevel;
 import io.daqiqa.inventory.domain.StockLevelRepository;
 import io.daqiqa.inventory.domain.StoreStock;
+import io.daqiqa.inventory.domain.Transition;
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.Sku;
 import io.daqiqa.kernel.SkuQuantity;
@@ -38,8 +39,9 @@ class ReservationServiceTest {
     private static final StoreId MARINA = StoreId.of("DXB-MARINA");
     private static final Sku MILK = Sku.of("MILK-FULL-1L");
     private static final Instant NOW = Instant.parse("2026-09-22T10:00:00Z");
+    private static final Duration HOLD = Duration.ofMinutes(5);
     private static final ReservationRequest REQUEST =
-            new ReservationRequest(MARINA, "order-1", List.of(new SkuQuantity(MILK, 2)), Duration.ofMinutes(5));
+            new ReservationRequest(MARINA, "order-1", List.of(new SkuQuantity(MILK, 2)), HOLD);
 
     private final ReservationRepository reservations = mock(ReservationRepository.class);
     private final StockLevelRepository stockLevels = mock(StockLevelRepository.class);
@@ -78,6 +80,26 @@ class ReservationServiceTest {
 
         assertThat(service.reserve(REQUEST)).isEqualTo(new Reserved(winner.id(), winner.expiresAt()));
         verify(stockLevels, never()).reserve(any(), any(), any());
+    }
+
+    @Test
+    void aRunOutHoldThatWasSweptWhileThisCallWaitedForItsLockIsLeftAloneAndTheBasketHeldAfresh() {
+        Reservation runOut = Reservation.hold(
+                ReservationId.newId(), MARINA, "order-1", REQUEST.lines(), NOW.minus(Duration.ofMinutes(10)), HOLD);
+        Transition sweptMeanwhile = runOut.expire(NOW);
+        given(reservations.findActiveByReference("order-1")).willReturn(Optional.of(runOut));
+        given(reservations.lockById(runOut.id())).willReturn(Optional.of(sweptMeanwhile.to()));
+        given(stockLevels.lockForUpdate(MARINA, List.of(MILK)))
+                .willReturn(StoreStock.of(MARINA, List.of(new StockLevel(MARINA, MILK, 10, 0))));
+        given(reservations.insertIfReferenceFree(any(), any())).willReturn(true);
+
+        assertThat(service.reserve(REQUEST))
+                .isInstanceOfSatisfying(
+                        Reserved.class,
+                        reserved -> assertThat(reserved.reservationId()).isNotEqualTo(runOut.id()));
+        verify(reservations, never()).apply(any(), any());
+        verify(stockLevels, never()).release(any(), any());
+        verify(stockLevels).reserve(MARINA, REQUEST.lines(), NOW);
     }
 
     @Test

@@ -18,6 +18,7 @@ import io.daqiqa.inventory.domain.Reservation;
 import io.daqiqa.inventory.domain.ReservationRepository;
 import io.daqiqa.inventory.domain.ReservationStatus;
 import io.daqiqa.inventory.domain.Shortfall;
+import io.daqiqa.inventory.domain.StockKey;
 import io.daqiqa.inventory.domain.StockLevelRepository;
 import io.daqiqa.inventory.domain.StoreStock;
 import io.daqiqa.inventory.domain.Transition;
@@ -29,6 +30,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -74,9 +77,10 @@ public class ReservationService implements InventoryReservations {
      *
      * <ol>
      *   <li>An active reservation for the reference is returned as it is, before any lock is taken: retries are cheap.
+     *       A hold whose time has run out is never returned: it expires first (see below).
      *   <li>The basket's stock rows are locked in SKU order, so baskets sharing SKUs queue instead of deadlocking.
      *   <li>Shortfalls are computed from the locked rows. Any shortfall rejects the whole basket, having written
-     *       nothing.
+     *       nothing (except, on a retry, the expiry of the reference's own run-out hold).
      *   <li>The reservation is inserted unless its reference was taken in the meantime ({@code INSERT ... ON CONFLICT DO
      *       NOTHING}: a unique violation would abort the caller's whole transaction).
      *   <li>The lines are added to the reserved quantities.
@@ -95,9 +99,14 @@ public class ReservationService implements InventoryReservations {
     }
 
     private ReservationResult hold(ReservationRequest request) {
-        Optional<Reservation> existing = reservations.findActiveByReference(request.reference());
-        if (existing.isPresent()) {
-            return replayed(existing.get());
+        Instant now = Timestamps.now(clock);
+        Optional<Reservation> active = reservations.findActiveByReference(request.reference());
+        if (active.isPresent()) {
+            Optional<Reservation> replay =
+                    active.get().isHeldPast(now) ? expireRunOutHold(active.get(), request, now) : active;
+            if (replay.isPresent()) {
+                return replayed(replay.get());
+            }
         }
         StoreStock stock = stockLevels.lockForUpdate(
                 request.storeId(),
@@ -109,7 +118,6 @@ public class ReservationService implements InventoryReservations {
                     .map(this::replayed)
                     .orElseGet(() -> rejected(shortfalls));
         }
-        Instant now = Timestamps.now(clock);
         Reservation reservation = Reservation.hold(
                 ReservationId.newId(),
                 request.storeId(),
@@ -126,6 +134,30 @@ public class ReservationService implements InventoryReservations {
         stockLevels.reserve(reservation.storeId(), reservation.lines(), now);
         metrics.reservation(ReserveOutcome.RESERVED);
         return new ReservationResult.Reserved(reservation.id(), reservation.expiresAt());
+    }
+
+    /**
+     * The reference's hold ran out and nobody has swept it yet. A retry must not be told it holds stock whose time has
+     * passed, so the hold expires now (stock back on sale, {@code ReservationExpiredV1}) and the call reserves afresh.
+     *
+     * <p>Locks follow the global order: the reservation row first, then the rows of its stock and of the new basket
+     * together, in one sorted statement. Locking them in two steps could interleave with a concurrent basket and
+     * deadlock.
+     *
+     * @return the reservation to replay instead, if it no longer needs expiring by the time its lock is held
+     */
+    private Optional<Reservation> expireRunOutHold(Reservation runOut, ReservationRequest request, Instant now) {
+        Reservation locked = lockExisting(runOut.id());
+        if (!locked.isHeldPast(now)) {
+            // Changed while this call waited for the lock: replay it if it still holds stock, else the reference is
+            // free.
+            return locked.status().holdsStock() ? Optional.of(locked) : Optional.empty();
+        }
+        Set<StockKey> rows = new TreeSet<>(locked.stockKeys());
+        request.lines().forEach(line -> rows.add(new StockKey(request.storeId(), line.sku())));
+        stockLevels.lockForUpdate(rows);
+        expire(List.of(locked.expire(now)), now, ExpiryTrigger.REPLAY);
+        return Optional.empty();
     }
 
     /**

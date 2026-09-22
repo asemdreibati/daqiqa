@@ -205,6 +205,45 @@ class ReservationConcurrencyTest extends InventoryIntegrationTest {
         });
     }
 
+    @Test
+    void retriesOfRunOutHoldsRacingCheckoutsAndSweepersExpireEachHoldOnceWithoutDeadlocks() throws Exception {
+        SKUS.forEach(sku -> {
+            tables.stock(MARINA, sku, 60);
+            tables.stock(JLT, sku, 60);
+        });
+        Random random = new Random(7);
+        List<ReservationRequest> originals = IntStream.range(0, 20)
+                .mapToObj(i -> randomBasket(random, "order-" + i))
+                .toList();
+        originals.forEach(reservations::reserve);
+        clock.advance(Duration.ofMinutes(1)); // every original hold has run out, none swept yet
+
+        Concurrently.run(64, task -> {
+            if (task < 40) { // two retries per reference, at the other store, with another basket
+                ReservationRequest retry =
+                        randomBasket(new Random(task), originals.get(task % 20).reference());
+                return reservations.reserve(new ReservationRequest(JLT, retry.reference(), retry.lines(), HOLD));
+            }
+            if (task < 60) {
+                return reservations.reserve(randomBasket(new Random(task), "fresh-" + task));
+            }
+            return sweeper.sweep();
+        });
+
+        assertThat(tables.unbalancedBooks()).isEmpty();
+        Map<String, Long> activePerReference = tables.reservations().stream()
+                .filter(reservation -> reservation.status().equals("HELD")
+                        || reservation.status().equals("CONFIRMED"))
+                .collect(Collectors.groupingBy(ReservationRow::reference, Collectors.counting()));
+        assertThat(activePerReference.values())
+                .allSatisfy(count -> assertThat(count).isEqualTo(1));
+        assertThat(outbox.committedEventsOfType(ReservationExpiredV1.class))
+                .extracting(ReservationExpiredV1::reference)
+                .as("each original hold expired exactly once, by a retry or a sweeper")
+                .containsExactlyInAnyOrderElementsOf(
+                        originals.stream().map(ReservationRequest::reference).toList());
+    }
+
     private void confirmUnlessGone(ReservationId reservation) {
         try {
             reservations.confirm(reservation);

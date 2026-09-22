@@ -37,12 +37,8 @@ public record HeldUnits(StoreId storeId, Sku sku, int quantity) {
                 .toList();
     }
 
-    private record StockKey(StoreId storeId, Sku sku) implements Comparable<StockKey> {
-
-        @Override
-        public int compareTo(StockKey other) {
-            int byStore = storeId.value().compareTo(other.storeId.value());
-            return byStore != 0 ? byStore : sku.value().compareTo(other.sku.value());
-        }
+    /** The stock row these units are held in. */
+    public StockKey key() {
+        return new StockKey(storeId, sku);
     }
 }

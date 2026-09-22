@@ -23,6 +23,12 @@ public interface StockLevelRepository {
      */
     StoreStock lockForUpdate(StoreId storeId, Collection<Sku> skus);
 
+    /**
+     * Locks the stock rows of {@code keys}, across stores, until the end of the current transaction: in one statement,
+     * in (store, SKU) order. For work that needs rows beyond one basket; rows that do not exist are not locked.
+     */
+    void lockForUpdate(Collection<StockKey> keys);
+
     /** The current levels of {@code skus} at {@code storeId}, without locking. */
     StoreStock find(StoreId storeId, Collection<Sku> skus);
 

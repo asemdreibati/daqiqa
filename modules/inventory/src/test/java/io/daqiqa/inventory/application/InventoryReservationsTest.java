@@ -93,6 +93,71 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
     }
 
     @Test
+    void aRetryAfterTheHoldRanOutExpiresItAndHoldsTheBasketAfresh() {
+        tables.stock(MARINA, MILK, 3);
+        Reserved first = assertReserved(reservations.reserve(basket("order-1", milk(2))));
+        double replayExpiries = counter("daqiqa.inventory.expirations", "trigger", "replay");
+        clock.advance(HOLD); // the hold ran out, and the sweeper has not run
+
+        Reserved retry = assertReserved(reservations.reserve(basket("order-1", milk(2))));
+
+        assertThat(retry.reservationId()).isNotEqualTo(first.reservationId());
+        assertThat(retry.expiresAt()).isEqualTo(clock.instant().plus(HOLD));
+        assertThat(tables.reservation(first.reservationId()))
+                .extracting(ReservationRow::status, ReservationRow::releaseReason)
+                .containsExactly("EXPIRED", "EXPIRED");
+        assertThat(tables.reservation(retry.reservationId()).status()).isEqualTo("HELD");
+        assertThat(tables.stockOf(MARINA, MILK).reserved()).isEqualTo(2);
+        assertThat(outbox.committedEventsOfType(ReservationExpiredV1.class))
+                .extracting(ReservationExpiredV1::reservationId)
+                .containsExactly(first.reservationId().value());
+        assertThat(counter("daqiqa.inventory.expirations", "trigger", "replay")).isEqualTo(replayExpiries + 1);
+        assertThat(tables.unbalancedBooks()).isEmpty();
+    }
+
+    @Test
+    void aRetryAfterTheHoldRanOutIsRejectedIfTheStockWentMeanwhileAndTheOldHoldStaysExpired() {
+        tables.stock(MARINA, MILK, 3);
+        Reserved first = assertReserved(reservations.reserve(basket("order-1", milk(2))));
+        clock.advance(HOLD);
+        assertReserved(reservations.reserve(basket("order-2", milk(1))));
+
+        ReservationResult retry = reservations.reserve(basket("order-1", milk(3)));
+
+        assertThat(retry).isEqualTo(new Rejected(List.of(new Shortage(MILK, 3, 2))));
+        assertThat(tables.reservation(first.reservationId()).status()).isEqualTo("EXPIRED");
+        assertThat(tables.stockOf(MARINA, MILK).reserved()).isEqualTo(1);
+        assertThat(tables.unbalancedBooks()).isEmpty();
+    }
+
+    @Test
+    void aRetryAtAnotherStoreAfterTheHoldRanOutReturnsTheOldStockAndHoldsTheNewBasket() {
+        tables.stock(MARINA, MILK, 3);
+        tables.stock(JLT, BREAD, 3);
+        Reserved first = assertReserved(reservations.reserve(basket("order-1", milk(2))));
+        clock.advance(HOLD.plusSeconds(1));
+
+        Reserved retry =
+                assertReserved(reservations.reserve(new ReservationRequest(JLT, "order-1", List.of(bread(2)), HOLD)));
+
+        assertThat(tables.reservation(first.reservationId()).status()).isEqualTo("EXPIRED");
+        assertThat(tables.reservation(retry.reservationId()).storeId()).isEqualTo("DXB-JLT");
+        assertThat(tables.stockOf(MARINA, MILK).reserved()).isZero();
+        assertThat(tables.stockOf(JLT, BREAD).reserved()).isEqualTo(2);
+    }
+
+    @Test
+    void aConfirmedReservationIsReplayedHoweverLongAfterItsHoldTime() {
+        tables.stock(MARINA, MILK, 3);
+        Reserved first = assertReserved(reservations.reserve(basket("order-1", milk(2))));
+        reservations.confirm(first.reservationId());
+        clock.advance(HOLD.multipliedBy(3));
+
+        assertThat(reservations.reserve(basket("order-1", milk(2)))).isEqualTo(first);
+        assertThat(tables.reservation(first.reservationId()).status()).isEqualTo("CONFIRMED");
+    }
+
+    @Test
     void aReferenceWhoseReservationEndedCanReserveAgain() {
         tables.stock(MARINA, MILK, 2);
         Reserved first = assertReserved(reservations.reserve(basket("order-1", milk(2))));
