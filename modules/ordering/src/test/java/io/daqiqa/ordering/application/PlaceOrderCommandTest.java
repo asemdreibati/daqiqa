@@ -50,6 +50,17 @@ class PlaceOrderCommandTest {
     }
 
     @Test
+    void aZeroCoordinateIsTheSameWithOrWithoutASign() {
+        PlaceOrderCommand unsigned = command(BASKET, "token-1", GeoPoint.of(0.0, 0.0), PaymentMethod.CARD);
+        PlaceOrderCommand signed = command(BASKET, "token-1", GeoPoint.of(-0.0, -0.0), PaymentMethod.CARD);
+
+        assertThat(signed.fingerprint()).isEqualTo(unsigned.fingerprint());
+        assertThat(command(BASKET, "token-1", GeoPoint.of(-0.0001, 0.0), PaymentMethod.CARD)
+                        .fingerprint())
+                .isNotEqualTo(unsigned.fingerprint());
+    }
+
+    @Test
     void anyMeaningfulDifferenceMakesADifferentRequest() {
         assertThat(List.of(
                         command(BASKET, "token-2", HOME, PaymentMethod.CARD),

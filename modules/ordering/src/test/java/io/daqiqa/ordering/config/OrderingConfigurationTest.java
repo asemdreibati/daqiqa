@@ -56,4 +56,19 @@ class OrderingConfigurationTest {
         contexts.withPropertyValues("daqiqa.ordering.idempotency.retention=30s")
                 .run(context -> assertThat(context).hasFailed());
     }
+
+    @Test
+    void refusesALeaseThatOutlastsTheHold() {
+        contexts.withPropertyValues("daqiqa.ordering.hold=45s")
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .hasMessageContaining("daqiqa.ordering.idempotency.lease (PT1M)")
+                        .hasMessageContaining("shorter than daqiqa.ordering.hold (PT45S)"));
+        contexts.withPropertyValues("daqiqa.ordering.hold=60s")
+                .run(context -> assertThat(context).hasFailed());
+        contexts.withPropertyValues("daqiqa.ordering.hold=45s", "daqiqa.ordering.idempotency.lease=30s")
+                .run(context -> assertThat(context).hasNotFailed());
+    }
 }

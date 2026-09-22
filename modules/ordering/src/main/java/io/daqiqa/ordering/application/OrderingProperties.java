@@ -33,11 +33,19 @@ public record OrderingProperties(
             throw new IllegalArgumentException("daqiqa.ordering.hold must be between " + ReservationRequest.MIN_HOLD
                     + " and " + ReservationRequest.MAX_HOLD + ", was " + hold);
         }
+        // A retry takes a stalled attempt over only once its lease has ended. Were the lease as long as the hold,
+        // every takeover would find the hold already expired, and a customer whose request stalled could only ever
+        // be told HOLD_EXPIRED.
+        if (idempotency.lease().compareTo(hold) >= 0) {
+            throw new IllegalArgumentException("daqiqa.ordering.idempotency.lease (" + idempotency.lease()
+                    + ") must be shorter than daqiqa.ordering.hold (" + hold + ")");
+        }
     }
 
     /**
      * @param lease how long a claimed key belongs to the request processing it. A retry arriving later takes the
-     *     claim over, presuming that request's instance died; keep it well above a normal checkout, payment included
+     *     claim over, presuming that request's instance died; keep it well above a normal checkout, payment included,
+     *     and below {@code daqiqa.ordering.hold}
      * @param retention how long a key and its stored response are kept (ADR-0008: 24 hours)
      * @param purgeInterval pause between two purges of expired keys
      * @param purgeBatchSize keys deleted per statement

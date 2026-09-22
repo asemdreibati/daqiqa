@@ -41,8 +41,9 @@ public record PlaceOrderCommand(
 
     /**
      * The fingerprint of this request's canonical form: the basket merged and sorted by SKU, numbers in Java's
-     * canonical notation. Retries that list the same basket in another order, or split a line in two, are the same
-     * request; any change of customer, token, basket, address or payment method is a different one.
+     * canonical notation with {@code -0.0} written as {@code 0.0}. Retries that list the same basket in another order,
+     * split a line in two, or write a zero coordinate with a sign are the same request; any change of customer, token,
+     * basket, address or payment method is a different one.
      */
     public RequestFingerprint fingerprint() {
         String basket = lines.stream()
@@ -55,7 +56,12 @@ public record PlaceOrderCommand(
                 "customer=" + customerId,
                 "promise=" + promiseToken,
                 "items=" + basket,
-                "deliverTo=" + deliveryLocation.latitude() + "," + deliveryLocation.longitude(),
+                "deliverTo=" + canonical(deliveryLocation.latitude()) + "," + canonical(deliveryLocation.longitude()),
                 "payment=" + paymentMethod));
+    }
+
+    /** {@code -0.0 == 0.0} yet the two print differently; both are the same place. */
+    private static double canonical(double coordinate) {
+        return coordinate == 0.0 ? 0.0 : coordinate;
     }
 }
