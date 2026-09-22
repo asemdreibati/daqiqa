@@ -47,3 +47,9 @@ rolls back.
   after it wait, preserving per-key order. Alert on `daqiqa.outbox.failures` and on the backlog gauge.
 - **Marking events published uses the partial index** (`AND published_at IS NULL`): 0.6 ms instead of 30 ms at 300,000
   retained rows.
+
+- **Rounds are time-boxed.** The relay publishes inside the transaction that locked the batch, so a slow broker would
+  otherwise hold a transaction open for batch size × send timeout and delay vacuuming of hot tables. A round stops
+  starting new publications once `daqiqa.messaging.relay.max-batch-duration` (2 s) is spent, commits what it published,
+  and continues next round. Head-of-line blocking remains by design (one failing event pauses the stream to keep
+  per-key order); publishing outside the transaction under a lease, or CDC, is the way out when it starts to matter.

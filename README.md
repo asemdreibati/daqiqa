@@ -11,7 +11,7 @@ tests.
 > **Status:** the promise-to-order core runs end to end on Dubai demo data (waves 0 and 1 are done). Fulfilment,
 > dispatch and the city simulator come next. The [status table](#status) says exactly what runs today.
 
-**By the numbers:** 571 tests, all passing on real PostgreSQL · `CheckoutEndToEndTest` drives promise, order, replay,
+**By the numbers:** 629 tests, all passing on real PostgreSQL · `CheckoutEndToEndTest` drives promise, order, replay,
 stock and outbox over HTTP through every real module · promise p99 ≤ 14 ms at 2,370 requests/s in a
 [first baseline](docs/benchmarks/2026-09-22-promise-baseline.md) on a shared 2-vCPU sandbox (target: p99 < 25 ms at
 1,000 requests/s per instance).
@@ -151,14 +151,14 @@ event's envelope is logged and the event is marked published instead of sent.
 | `DAQIQA_FLYWAY_LOCATIONS` | `classpath:db/migration` (`dev` profile: plus `classpath:db/demo`) | Where Flyway reads migrations |
 | `DAQIQA_LOG_FORMAT` | plain text | `ecs` for JSON logs |
 
-**Tests.** `./gradlew build` checks formatting, compiles, and runs all 571 unit, property, integration, concurrency,
+**Tests.** `./gradlew build` checks formatting, compiles, and runs all 629 unit, property, integration, concurrency,
 end-to-end and architecture tests. Integration tests use real PostgreSQL:
 
 ```bash
 ./gradlew build    # with Docker: Testcontainers starts postgres:17-alpine once per test JVM
 
 # Without Docker: point the build at any PostgreSQL server whose user may create databases.
-# Each test JVM creates its own database and drops it on exit.
+# Each test JVM creates its own database; later runs drop databases older than an hour.
 export DAQIQA_TEST_PG_URL=jdbc:postgresql://localhost:5432/postgres
 export DAQIQA_TEST_PG_USER=postgres DAQIQA_TEST_PG_PASSWORD=postgres   # the defaults
 ./gradlew build

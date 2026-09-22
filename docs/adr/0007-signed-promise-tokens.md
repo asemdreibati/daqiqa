@@ -43,3 +43,11 @@ The review found two ways a valid token could still be honoured wrongly, and bot
 
 Tokens are still stateless and reusable within their 90 s window; a promise converts to at most one *live* order,
 which ordering enforces (ADR-0008).
+
+Two consequences of carrying the location:
+
+- The payload is no longer free of personal data: it holds the delivery point to metre precision, which is close to an
+  address. Tokens are therefore never logged, and problem details never echo them.
+- A token whose lifetime is not within the configured validity, or that claims to have been issued more than 30 seconds
+  in the future, is rejected as `MALFORMED` even when its signature checks out. A leaked key can then not mint
+  long-lived promises, and the development key is refused outside the `dev` profile (the server will not start with it).

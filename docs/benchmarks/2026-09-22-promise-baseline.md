@@ -32,7 +32,11 @@ The JVM was warmed up with 24,000 requests before the measured runs.
 - **The work itself is about a millisecond** (p50 ≤ 1 ms at low concurrency). The tail at 32 clients is CPU queueing:
   two cores are shared by the load generator, the server and PostgreSQL, so latency there measures the sandbox more
   than the code.
-- **No errors under load**, and none of the 44,000 requests needed more than one database round trip.
+- **No errors under load** across the 54,000 requests (24,000 warm-up and 3 × 10,000 measured); none needed more than
+  one database round trip.
+- **Run-to-run variance is large on this machine.** An independent rerun with the same method, while other work shared
+  the two cores, measured 1,794 req/s with p99 ≤ 22.4 ms. Treat these numbers as an order of magnitude that clears the
+  target, not as a precise result; wave 3 measures on dedicated hardware.
 
 ## Not measured yet
 

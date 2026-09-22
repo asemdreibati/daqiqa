@@ -58,4 +58,7 @@ The decision stands; the review sharpened four details of how it is carried out.
 - **A replay never hands back a dead hold.** Reserving again for a reference whose hold has run out but not yet been
   swept expires it first (reservation, then its rows and the basket's rows in one sorted lock), then reserves afresh.
 - **Lock waits are bounded.** Every connection sets `lock_timeout = '3s'`: a checkout stuck behind a hot row fails fast
-  and is retried with its idempotency key; sweepers and the relay never wait (`SKIP LOCKED`, try-locks).
+  and is retried with its idempotency key. Background jobs pick their work without waiting (`SKIP LOCKED`, try-locks),
+  but returning stock still takes row locks, so each sweeping transaction caps its own wait with
+  `SET LOCAL lock_timeout` (500 ms) and treats a lock timeout, deadlock or serialization failure as contention: the
+  batch is left for the next round instead of being reported as a poisoned hold.

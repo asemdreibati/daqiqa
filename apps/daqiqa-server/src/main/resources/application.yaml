@@ -14,7 +14,8 @@ spring:
       # the request for Hikari's default 30 s. Milliseconds.
       connection-timeout: 2000
       # Bound every lock wait. A checkout stuck behind a hot stock row fails fast (the client retries with its
-      # idempotency key) instead of piling up connections. Scheduled jobs use SKIP LOCKED or try-locks and never wait.
+      # idempotency key) instead of piling up connections. Scheduled jobs pick their work with SKIP LOCKED or
+      # try-locks and cap their own waits with SET LOCAL lock_timeout, so contention costs them a round, not a thread.
       connection-init-sql: "SET lock_timeout = '3s'"
   flyway:
     # db/migration: the schema, owned by each module. The Dubai demo data (db/demo) comes with the dev profile only.

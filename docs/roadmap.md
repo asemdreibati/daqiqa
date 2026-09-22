@@ -84,7 +84,7 @@ into one running server. Decisions from the review and the integration are recor
 - [x] Demo stores and stock exist, so the README walkthrough runs end to end. [`V9_1__demo_stores.sql`,
       `V9_3__demo_stock.sql`.]
 
-Beyond the criteria: 571 tests in total, all passing on real PostgreSQL, and a first promise-latency baseline that
+Beyond the criteria: 629 tests in total, all passing on real PostgreSQL, and a first promise-latency baseline that
 meets the target on a shared 2-vCPU sandbox (p99 ≤ 14 ms at 2,370 requests per second). The target is formally
 verified on dedicated hardware in wave 3.
 

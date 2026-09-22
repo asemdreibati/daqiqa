@@ -7,7 +7,7 @@ whatever crashes. This guide explains how the system is shaped for both. Each de
 [ADR](../adr/README.md); each module's detail, as built, is in its [design note](../design/README.md).
 
 > **Status.** Waves 0 and 1 are done: every module below is built, reviewed, merged and integrated into one running
-> server, with 571 tests passing on real PostgreSQL and an end-to-end test over HTTP. Later work is marked
+> server, with 629 tests passing on real PostgreSQL and an end-to-end test over HTTP. Later work is marked
 > *planned*. See the [roadmap](../roadmap.md).
 
 ## Contents
@@ -528,8 +528,9 @@ flowchart TB
   profile (`application-dev.yaml`, which `bootRun` activates) and nowhere else: configured under any id while that
   profile is inactive, it stops the server at startup (`DevelopmentKeyGuard`). The demo data (`classpath:db/demo`) is
   part of the same profile.
-- **Every connection sets `lock_timeout = '3s'`**, so a request never waits longer than that for a row lock; the jobs
-  use `SKIP LOCKED` and try-locks and never wait at all.
+- **Every connection sets `lock_timeout = '3s'`**, so a request never waits longer than that for a row lock. Jobs pick
+  their work with `SKIP LOCKED` and try-locks, and cap their own row-lock waits at 500 ms (`SET LOCAL lock_timeout`),
+  counting a timeout as contention and retrying in the next round.
 - **Rolling restarts are safe.** `server.shutdown=graceful` finishes in-flight requests; liveness and readiness
   probes are exposed under `/actuator/health`.
 - **Schema changes run at startup** through Flyway (`outOfOrder=true`, per-module majors). A merged migration is
