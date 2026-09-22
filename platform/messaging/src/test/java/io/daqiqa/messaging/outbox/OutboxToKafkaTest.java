@@ -53,6 +53,7 @@ import tools.jackson.databind.json.JsonMapper;
             // The producer settings docs/design/ordering.md recommends for the server.
             "spring.kafka.producer.properties.max.in.flight.requests.per.connection=5",
             "spring.kafka.producer.properties.linger.ms=0",
+            "spring.kafka.producer.properties.max.block.ms=5000",
             "spring.kafka.producer.properties.request.timeout.ms=5000",
             "spring.kafka.producer.properties.delivery.timeout.ms=8000"
         })

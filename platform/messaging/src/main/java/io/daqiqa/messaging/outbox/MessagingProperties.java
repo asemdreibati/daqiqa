@@ -6,11 +6,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
- * Configuration of the transactional outbox, bound from {@code daqiqa.messaging.*}. Every value has a default, so the
- * application starts without any configuration (publishing to the log).
+ * Configuration of the transactional outbox, bound from {@code daqiqa.messaging.*}. Every value has a default.
  *
- * @param publisher where the relay publishes: {@code logging} (default, no broker needed) or {@code kafka}. The value
- *     selects the {@link EventPublisher} bean; it is bound here too so that a typo fails at startup
+ * @param publisher where the relay publishes: {@code kafka} (the default; the {@code spring.kafka.producer} settings
+ *     must then be explicitly durable, see the Kafka publisher) or {@code logging}, an explicit opt-in for local runs
+ *     without a broker. Missing configuration must never make the relay mark events published that went nowhere. The
+ *     value selects the {@link EventPublisher} bean; it is bound here too so that a typo fails at startup
  * @param relay how often and how much the relay publishes
  * @param retention how long published events are kept before the purge deletes them
  * @param purge how often and in what batches published events are deleted
@@ -18,7 +19,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  */
 @ConfigurationProperties("daqiqa.messaging")
 public record MessagingProperties(
-        @DefaultValue("logging") Publisher publisher,
+        @DefaultValue("kafka") Publisher publisher,
         @DefaultValue Relay relay,
         @DefaultValue("7d") Duration retention,
         @DefaultValue Purge purge,

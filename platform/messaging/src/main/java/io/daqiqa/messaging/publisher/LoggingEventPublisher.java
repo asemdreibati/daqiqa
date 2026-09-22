@@ -8,13 +8,14 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * Publishes outbox events to the log: the default ({@code daqiqa.messaging.publisher=logging}), so the application
- * and its outbox run locally without a broker.
+ * Publishes outbox events to the log, for local runs without a broker. An explicit opt-in
+ * ({@code daqiqa.messaging.publisher=logging}), never the default: the relay marks what it publishes as published, so
+ * a deployment that fell back to this publisher by missing configuration would silently drop every event.
  *
  * <p>Logs the envelope only, never the payload: payloads can carry personal data (an order's delivery location).
  */
 @Component
-@ConditionalOnProperty(name = "daqiqa.messaging.publisher", havingValue = "logging", matchIfMissing = true)
+@ConditionalOnProperty(name = "daqiqa.messaging.publisher", havingValue = "logging")
 class LoggingEventPublisher implements EventPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingEventPublisher.class);

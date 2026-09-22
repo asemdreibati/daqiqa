@@ -5,38 +5,44 @@ import io.daqiqa.messaging.outbox.EventPublisher;
 import io.daqiqa.messaging.outbox.MessagingProperties;
 import io.daqiqa.messaging.outbox.PendingEvent;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.jspecify.annotations.Nullable;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * Publishes outbox events to Kafka (active when {@code daqiqa.messaging.publisher=kafka}).
+ * Publishes outbox events to Kafka: the default publisher ({@code daqiqa.messaging.publisher=kafka}, or unset).
  *
  * <p>The record key is the event's partition key (the store id for store-scoped facts), so each store's events land
  * in one partition, in order. The value is the event JSON; CloudEvents attributes travel as headers. Each send waits
  * for the broker's acknowledgement, bounded by {@code daqiqa.messaging.kafka.send-timeout}, because the relay may mark
  * an event published only once it is durable.
  *
- * <p>The producer comes from Spring Boot ({@code spring.kafka.*}) and must be idempotent with {@code acks=all}: the
- * constructor refuses a configuration that could lose acknowledged events or reorder retried ones.
+ * <p>The producer comes from Spring Boot ({@code spring.kafka.*}). The constructor refuses one that is not explicitly
+ * configured to keep acknowledged events, in order, without stalling the relay (see {@link #requireDurableProducer}).
  */
 @Component
-@ConditionalOnProperty(name = "daqiqa.messaging.publisher", havingValue = "kafka")
+@ConditionalOnProperty(name = "daqiqa.messaging.publisher", havingValue = "kafka", matchIfMissing = true)
 class KafkaEventPublisher implements EventPublisher {
+
+    /** The most in-flight requests with which an idempotent producer still keeps each partition in order. */
+    static final int MAX_IN_FLIGHT = 5;
 
     private final KafkaTemplate<String, String> kafka;
     private final Duration sendTimeout;
 
     KafkaEventPublisher(KafkaTemplate<String, String> kafka, MessagingProperties properties) {
-        requireDurableProducer(kafka.getProducerFactory().getConfigurationProperties());
-        this.kafka = kafka;
         this.sendTimeout = properties.kafka().sendTimeout();
+        requireDurableProducer(kafka.getProducerFactory().getConfigurationProperties(), sendTimeout);
+        this.kafka = kafka;
     }
 
     @Override
@@ -57,20 +63,46 @@ class KafkaEventPublisher implements EventPublisher {
     }
 
     /**
-     * Idempotence (with its default of at most five in-flight requests) keeps retried batches in order and free of
-     * duplicates within a partition; {@code acks=all} means an acknowledged event survives the loss of the leader.
-     * Kafka's own defaults are both, so only an explicit override is rejected.
+     * Refuses a producer that could lose, reorder or stall. The settings must be explicit: Kafka's defaults have changed
+     * between versions ({@code acks} was 1 before 3.0), and whether acknowledged events survive must not hang on one.
+     *
+     * <ul>
+     *   <li>{@code acks=all}: an acknowledged event survives the loss of the partition leader;
+     *   <li>{@code enable.idempotence=true}: retried batches are neither duplicated nor reordered within a partition;
+     *   <li>{@code max.in.flight.requests.per.connection} at most 5 (the default): the most idempotence keeps in order;
+     *   <li>{@code max.block.ms} at most the send timeout: {@code send} itself may block that long (fetching metadata,
+     *       a full buffer) before the relay's timeout starts, holding the relay lock and stalling every later event.
+     * </ul>
      */
-    static void requireDurableProducer(Map<String, Object> config) {
-        Object acks = config.get(ProducerConfig.ACKS_CONFIG);
-        if (acks != null && !"all".equals(String.valueOf(acks)) && !"-1".equals(String.valueOf(acks))) {
+    static void requireDurableProducer(Map<String, Object> config, Duration sendTimeout) {
+        List<String> missing = new ArrayList<>();
+        String acks = setting(config, ProducerConfig.ACKS_CONFIG);
+        if (!"all".equals(acks) && !"-1".equals(acks)) {
+            missing.add("spring.kafka.producer.acks=all (was " + acks + ")");
+        }
+        String idempotence = setting(config, ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG);
+        if (!"true".equalsIgnoreCase(idempotence)) {
+            missing.add("spring.kafka.producer.properties.enable.idempotence=true (was " + idempotence + ")");
+        }
+        String inFlight = setting(config, ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION);
+        if (inFlight != null && Integer.parseInt(inFlight) > MAX_IN_FLIGHT) {
+            missing.add("spring.kafka.producer.properties.max.in.flight.requests.per.connection at most "
+                    + MAX_IN_FLIGHT + " (was " + inFlight + ")");
+        }
+        String maxBlock = setting(config, ProducerConfig.MAX_BLOCK_MS_CONFIG);
+        if (maxBlock == null || Long.parseLong(maxBlock) > sendTimeout.toMillis()) {
+            missing.add("spring.kafka.producer.properties.max.block.ms at most daqiqa.messaging.kafka.send-timeout, "
+                    + sendTimeout.toMillis() + " ms (was " + maxBlock + ")");
+        }
+        if (!missing.isEmpty()) {
             throw new IllegalStateException(
-                    "The outbox publisher needs spring.kafka.producer.acks=all, but acks is " + acks);
+                    "The outbox publishes to Kafka only through a durable producer; set " + String.join(", ", missing)
+                            + ". For local runs without a broker, set daqiqa.messaging.publisher=logging.");
         }
-        Object idempotence = config.get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG);
-        if (idempotence != null && !Boolean.parseBoolean(String.valueOf(idempotence))) {
-            throw new IllegalStateException("The outbox publisher needs an idempotent producer, but "
-                    + ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG + " is " + idempotence);
-        }
+    }
+
+    private static @Nullable String setting(Map<String, Object> config, String name) {
+        Object value = config.get(name);
+        return value == null ? null : String.valueOf(value).trim();
     }
 }

@@ -22,7 +22,9 @@ import org.springframework.test.context.DynamicPropertySource;
 /** With scheduling on, as in the server, the relay and the purge run on their configured intervals. */
 @Tag("integration")
 @DirtiesContext // stop the scheduled jobs with this class, so they never run into other tests
-@SpringBootTest(classes = {MessagingTestApplication.class, MessagingSchedulingTest.SchedulingOn.class})
+@SpringBootTest(
+        classes = {MessagingTestApplication.class, MessagingSchedulingTest.SchedulingOn.class},
+        properties = "daqiqa.messaging.publisher=logging")
 class MessagingSchedulingTest {
 
     @DynamicPropertySource
