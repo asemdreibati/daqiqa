@@ -109,7 +109,9 @@ class PromiseModuleTest {
         String token = JsonPath.read(response.getResponse().getContentAsString(), "$.offer.token");
 
         VerifiedPromise verified = verifier.verify(
-                token, List.of(new SkuQuantity(BREAD, 1), new SkuQuantity(MILK, 1), new SkuQuantity(MILK, 1)));
+                token,
+                List.of(new SkuQuantity(BREAD, 1), new SkuQuantity(MILK, 1), new SkuQuantity(MILK, 1)),
+                GeoPoint.of(25.0772, 55.1390));
 
         assertThat(verified.storeId()).isEqualTo(MARINA);
         assertThat(verified.tier()).isEqualTo(DeliveryTier.EXPRESS_15);

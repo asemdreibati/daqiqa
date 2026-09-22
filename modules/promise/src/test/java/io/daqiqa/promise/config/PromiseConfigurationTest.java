@@ -13,7 +13,9 @@ import io.daqiqa.network.api.DarkStore;
 import io.daqiqa.network.api.StoreDirectory;
 import io.daqiqa.network.api.StoreStatus;
 import io.daqiqa.promise.api.DeliveryTier;
+import io.daqiqa.promise.api.InvalidPromiseException;
 import io.daqiqa.promise.api.PromiseTokenVerifier;
+import io.daqiqa.promise.application.IssuedPromise;
 import io.daqiqa.promise.application.PromiseTokenCodec;
 import io.daqiqa.promise.domain.Basket;
 import io.daqiqa.promise.domain.EtaBreakdown;
@@ -38,6 +40,11 @@ class PromiseConfigurationTest {
     private static final String KEY_16_BYTES = Base64.getEncoder().encodeToString(new byte[16]);
     private static final StoreId OPEN_STORE = StoreId.of("DXB-OPEN");
     private static final StoreId BUSY_STORE = StoreId.of("DXB-BUSY");
+    private static final GeoPoint CUSTOMER = GeoPoint.of(25.0772, 55.139);
+    private static final List<SkuQuantity> BASKET = List.of(SkuQuantity.of("MILK-FULL-1L", 1));
+
+    /** Mean Earth radius, as used by {@link GeoPoint#distanceMetersTo}: due north, distances are exact. */
+    private static final double EARTH_RADIUS_METERS = 6_371_008.8;
 
     private final ApplicationContextRunner context = new ApplicationContextRunner()
             .withUserConfiguration(PromiseConfiguration.class)
@@ -91,6 +98,14 @@ class PromiseConfigurationTest {
     }
 
     @Test
+    void refusesToStartWithALocationToleranceThatIsNotPositive() {
+        withKey.withPropertyValues("daqiqa.promise.token.location-tolerance=0")
+                .run(app -> assertThat(app)
+                        .getFailure()
+                        .hasStackTraceContaining("daqiqa.promise.token.location-tolerance must be a positive number"));
+    }
+
+    @Test
     void startsWithASigningKeyAndTheDocumentedDefaults() {
         withKey.run(app -> {
             assertThat(app).hasNotFailed().hasSingleBean(PromiseTokenVerifier.class);
@@ -103,6 +118,7 @@ class PromiseConfigurationTest {
             assertThat(app.getBean(PromiseCalibration.class).bufferAt(OPEN_STORE))
                     .isEqualTo(ofSeconds(90));
             assertThat(issueToken(app.getBean(PromiseTokenCodec.class))).isEqualTo(NOW.plusSeconds(90));
+            assertToleranceIs(100, app.getBean(PromiseTokenVerifier.class), app.getBean(PromiseTokenCodec.class));
         });
     }
 
@@ -117,7 +133,8 @@ class PromiseConfigurationTest {
                         "daqiqa.promise.load.busy.queue=240s",
                         "daqiqa.promise.load.busy.rider-wait=120s",
                         "daqiqa.promise.buffer=2m",
-                        "daqiqa.promise.token.validity=60s")
+                        "daqiqa.promise.token.validity=60s",
+                        "daqiqa.promise.token.location-tolerance=250")
                 .run(app -> {
                     assertThat(app.getBean(PickTimeModel.class))
                             .isEqualTo(new PickTimeModel(ofSeconds(30), ofSeconds(5), ofSeconds(300)));
@@ -128,13 +145,41 @@ class PromiseConfigurationTest {
                     assertThat(app.getBean(PromiseCalibration.class).bufferAt(OPEN_STORE))
                             .isEqualTo(ofSeconds(120));
                     assertThat(issueToken(app.getBean(PromiseTokenCodec.class))).isEqualTo(NOW.plusSeconds(60));
+                    assertToleranceIs(
+                            250, app.getBean(PromiseTokenVerifier.class), app.getBean(PromiseTokenCodec.class));
                 });
     }
 
     private static Instant issueToken(PromiseTokenCodec codec) {
+        return issue(codec).expiresAt();
+    }
+
+    /** The verifier accepts a delivery half a metre inside the tolerance and rejects one half a metre outside. */
+    private static void assertToleranceIs(double meters, PromiseTokenVerifier verifier, PromiseTokenCodec codec) {
+        String token = issue(codec).token();
+        assertThat(accepts(verifier, token, meters - 0.5))
+                .as("%s m inside", meters)
+                .isTrue();
+        assertThat(accepts(verifier, token, meters + 0.5))
+                .as("%s m outside", meters)
+                .isFalse();
+    }
+
+    private static boolean accepts(PromiseTokenVerifier verifier, String token, double metersNorth) {
+        GeoPoint delivery = GeoPoint.of(
+                CUSTOMER.latitude() + Math.toDegrees(metersNorth / EARTH_RADIUS_METERS), CUSTOMER.longitude());
+        try {
+            verifier.verify(token, BASKET, delivery);
+            return true;
+        } catch (InvalidPromiseException e) {
+            assertThat(e.reason()).isEqualTo(InvalidPromiseException.Reason.LOCATION_MISMATCH);
+            return false;
+        }
+    }
+
+    private static IssuedPromise issue(PromiseTokenCodec codec) {
         Quote quote = new Quote(OPEN_STORE, DeliveryTier.EXPRESS_15, new EtaBreakdown(60, 69, 60, 330, 90));
-        return codec.issue(quote, Basket.of(List.of(SkuQuantity.of("MILK-FULL-1L", 1))))
-                .expiresAt();
+        return codec.issue(quote, Basket.of(BASKET), CUSTOMER);
     }
 
     private static StoreDirectory directory() {

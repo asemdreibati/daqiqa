@@ -56,6 +56,7 @@ class PromiseServiceTest {
 
     private final PromiseTokenCodec tokens =
             new PromiseTokenCodec(new SigningKeys(Map.of("k1", key(1)), "k1"), Duration.ofSeconds(90), clock);
+    private final CheckoutPromiseVerifier checkout = new CheckoutPromiseVerifier(tokens, directory, clock, 100);
 
     private final AvailabilityQuery availability = (stores, skus) -> {
         availabilityCalls.add(new AvailabilityCall(List.copyOf(stores), List.copyOf(skus)));
@@ -91,7 +92,7 @@ class PromiseServiceTest {
         assertThat(offer.quote().breakdown()).isEqualTo(new EtaBreakdown(60, 69, 60, 330, 90));
         assertThat(offer.quote().etaMinutes()).isEqualTo(11);
         assertThat(offer.expiresAt()).isEqualTo(NOW.plusSeconds(90));
-        VerifiedPromise verified = tokens.verify(offer.token(), BREAKFAST);
+        VerifiedPromise verified = checkout.verify(offer.token(), BREAKFAST, CUSTOMER);
         assertThat(verified.promiseId()).isEqualTo(offer.promiseId());
         assertThat(verified.storeId()).isEqualTo(MARINA);
         assertThat(verified.etaMinutes()).isEqualTo(11);
@@ -139,7 +140,8 @@ class PromiseServiceTest {
 
         assertThat(offer.quote().breakdown().pickSeconds()).isEqualTo(69);
         assertThat(availabilityCalls.getFirst().skus()).containsExactly(BREAD, MILK);
-        assertThat(tokens.verify(offer.token(), BREAKFAST).promiseId()).isEqualTo(offer.promiseId());
+        assertThat(checkout.verify(offer.token(), BREAKFAST, CUSTOMER).promiseId())
+                .isEqualTo(offer.promiseId());
     }
 
     @Test

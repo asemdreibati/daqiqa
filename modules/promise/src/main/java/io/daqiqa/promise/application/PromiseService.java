@@ -57,7 +57,8 @@ public class PromiseService {
         PromiseResult result =
                 switch (calculator.decide(basket, candidates, stockAt(candidates, basket))) {
                     case PromiseDecision.Offered offered ->
-                        new PromiseResult.Available(tokens.issue(offered.quote(), basket), offered.suggestions());
+                        new PromiseResult.Available(
+                                tokens.issue(offered.quote(), basket, location), offered.suggestions());
                     case PromiseDecision.Unavailable unavailable ->
                         new PromiseResult.Unavailable(unavailable.reason(), unavailable.suggestions());
                 };

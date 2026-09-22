@@ -1,6 +1,7 @@
 package io.daqiqa.promise.config;
 
 import io.daqiqa.network.api.StoreDirectory;
+import io.daqiqa.promise.application.CheckoutPromiseVerifier;
 import io.daqiqa.promise.application.PromiseTokenCodec;
 import io.daqiqa.promise.application.SigningKeys;
 import io.daqiqa.promise.application.StatusBasedStoreLoad;
@@ -46,7 +47,6 @@ class PromiseConfiguration {
         return new PromiseCalculator(pickTime, storeLoad, calibration);
     }
 
-    /** Also the {@link io.daqiqa.promise.api.PromiseTokenVerifier} that checkout uses. */
     @Bean
     PromiseTokenCodec promiseTokenCodec(PromiseProperties properties, Clock clock) {
         PromiseProperties.Token token = properties.token();
@@ -54,5 +54,13 @@ class PromiseConfiguration {
                 new SigningKeys(token.decodedKeys(), Objects.requireNonNull(token.activeKeyId())),
                 token.validity(),
                 clock);
+    }
+
+    /** The {@link io.daqiqa.promise.api.PromiseTokenVerifier} that checkout uses. */
+    @Bean
+    CheckoutPromiseVerifier promiseTokenVerifier(
+            PromiseTokenCodec tokens, StoreDirectory stores, Clock clock, PromiseProperties properties) {
+        return new CheckoutPromiseVerifier(
+                tokens, stores, clock, properties.token().locationTolerance());
     }
 }

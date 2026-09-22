@@ -47,11 +47,14 @@ record PromiseProperties(
      * @param keys signing keys by id, base64-encoded, at least 32 bytes each; keys other than the active one only
      *     verify (rotation)
      * @param validity how long a promise can be turned into an order
+     * @param locationTolerance how far, in metres, the delivery location may be from the location the promise was made
+     *     for
      */
     record Token(
             @Nullable String activeKeyId,
             @DefaultValue Map<String, String> keys,
-            @DefaultValue("90s") Duration validity) {
+            @DefaultValue("90s") Duration validity,
+            @DefaultValue("100") double locationTolerance) {
 
         private static final String PREFIX = "daqiqa.promise.token.";
 
@@ -68,6 +71,10 @@ record PromiseProperties(
             }
             keys = Map.copyOf(keys);
             keys.forEach(Token::decode);
+            if (!(locationTolerance > 0 && Double.isFinite(locationTolerance))) {
+                throw new IllegalStateException(
+                        PREFIX + "location-tolerance must be a positive number of metres, was " + locationTolerance);
+            }
         }
 
         /** The keys as bytes. */

@@ -6,13 +6,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
+import io.daqiqa.kernel.GeoPoint;
 import io.daqiqa.kernel.SkuQuantity;
 import io.daqiqa.kernel.StoreId;
 import io.daqiqa.promise.MutableClock;
 import io.daqiqa.promise.api.DeliveryTier;
 import io.daqiqa.promise.api.InvalidPromiseException;
 import io.daqiqa.promise.api.InvalidPromiseException.Reason;
-import io.daqiqa.promise.api.VerifiedPromise;
 import io.daqiqa.promise.domain.Basket;
 import io.daqiqa.promise.domain.EtaBreakdown;
 import io.daqiqa.promise.domain.Quote;
@@ -25,17 +25,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+/** The token format and its cryptography; whether a token holds for an order is {@link CheckoutPromiseVerifierTest}. */
 class PromiseTokenCodecTest {
 
     /** Deliberately not on a whole second: tokens carry whole seconds. */
-    private static final Instant NOW = Instant.parse("2026-09-22T12:00:00.750Z");
+    static final Instant NOW = Instant.parse("2026-09-22T12:00:00.750Z");
 
-    private static final Instant ISSUED_AT = Instant.parse("2026-09-22T12:00:00Z");
-    private static final Instant EXPIRES_AT = Instant.parse("2026-09-22T12:01:30Z");
-
-    private static final List<SkuQuantity> BREAKFAST =
+    static final Instant ISSUED_AT = Instant.parse("2026-09-22T12:00:00Z");
+    static final Instant EXPIRES_AT = Instant.parse("2026-09-22T12:01:30Z");
+    static final GeoPoint CUSTOMER = GeoPoint.of(25.0772, 55.139);
+    static final List<SkuQuantity> BREAKFAST =
             List.of(SkuQuantity.of("MILK-FULL-1L", 2), SkuQuantity.of("BREAD-ARABIC-6PK", 1));
-    private static final Quote QUOTE =
+    static final Quote QUOTE =
             new Quote(StoreId.of("DXB-MARINA"), DeliveryTier.EXPRESS_15, new EtaBreakdown(60, 69, 60, 330, 90));
 
     private final MutableClock clock = new MutableClock(NOW);
@@ -43,7 +44,7 @@ class PromiseTokenCodecTest {
 
     @Test
     void issuesATokenInTheDocumentedFormat() throws Exception {
-        IssuedPromise issued = codec.issue(QUOTE, Basket.of(BREAKFAST));
+        IssuedPromise issued = issue(codec);
         String[] parts = issued.token().split("\\.", -1);
 
         assertThat(parts).hasSize(4);
@@ -59,105 +60,59 @@ class PromiseTokenCodecTest {
                         "11",
                         Long.toString(ISSUED_AT.getEpochSecond()),
                         Long.toString(EXPIRES_AT.getEpochSecond()),
-                        Tokens.sha256("BREAD-ARABIC-6PK:1,MILK-FULL-1L:2")));
+                        Tokens.sha256("BREAD-ARABIC-6PK:1,MILK-FULL-1L:2"),
+                        "25077200",
+                        "55139000"));
         assertThat(issued.token()).isEqualTo(Tokens.sign("k1", key(1), payloadOf(issued.token())));
         assertThat(issued.expiresAt()).isEqualTo(EXPIRES_AT);
     }
 
     @Test
-    void aTokenVerifiesForTheBasketItWasIssuedFor() {
-        IssuedPromise issued = codec.issue(QUOTE, Basket.of(BREAKFAST));
+    void authenticatesATokenItIssued() {
+        IssuedPromise issued = issue(codec);
 
-        VerifiedPromise verified = codec.verify(issued.token(), BREAKFAST);
+        TokenClaims claims = codec.authenticate(issued.token());
 
-        assertThat(verified)
-                .isEqualTo(new VerifiedPromise(
-                        issued.promiseId(),
-                        StoreId.of("DXB-MARINA"),
-                        DeliveryTier.EXPRESS_15,
-                        11,
-                        ISSUED_AT,
-                        EXPIRES_AT));
-    }
-
-    @Test
-    void theSameBasketListedInAnotherOrderOrWithSplitLinesStillMatches() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
-
-        List<SkuQuantity> reordered = List.of(
-                SkuQuantity.of("BREAD-ARABIC-6PK", 1),
-                SkuQuantity.of("MILK-FULL-1L", 1),
-                SkuQuantity.of("MILK-FULL-1L", 1));
-
-        assertThat(codec.verify(token, reordered).storeId()).isEqualTo(StoreId.of("DXB-MARINA"));
-    }
-
-    @Test
-    void anotherBasketIsACartMismatch() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
-
-        assertRejected(token, List.of(SkuQuantity.of("MILK-FULL-1L", 3), SkuQuantity.of("BREAD-ARABIC-6PK", 1)))
-                .isEqualTo(Reason.CART_MISMATCH);
-        assertRejected(token, List.of(SkuQuantity.of("MILK-FULL-1L", 2))).isEqualTo(Reason.CART_MISMATCH);
-        assertRejected(
-                        token,
-                        List.of(
-                                SkuQuantity.of("MILK-FULL-1L", 2),
-                                SkuQuantity.of("BREAD-ARABIC-6PK", 1),
-                                SkuQuantity.of("EGGS-12", 1)))
-                .isEqualTo(Reason.CART_MISMATCH);
-        assertRejected(token, List.of()).isEqualTo(Reason.CART_MISMATCH);
+        assertThat(claims.promiseId()).isEqualTo(issued.promiseId());
+        assertThat(claims.storeId()).isEqualTo(StoreId.of("DXB-MARINA"));
+        assertThat(claims.tier()).isEqualTo(DeliveryTier.EXPRESS_15);
+        assertThat(claims.etaMinutes()).isEqualTo(11);
+        assertThat(claims.expiresAt()).isEqualTo(EXPIRES_AT);
+        assertThat(claims.location()).isEqualTo(CUSTOMER);
     }
 
     @Test
     void aTokenWhosePayloadWasAlteredIsTampered() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
+        String token = issue(codec).token();
         String[] parts = token.split("\\.");
+
         String fasterPromise = payloadOf(token).replace("|11|", "|5|");
+        String elsewhere = payloadOf(token).replace("|55139000", "|55239000");
 
-        String forged = parts[0] + "." + parts[1] + "." + Tokens.base64Url(fasterPromise) + "." + parts[3];
-
-        assertRejected(forged, BREAKFAST).isEqualTo(Reason.TAMPERED);
+        assertRejected(parts[0] + "." + parts[1] + "." + Tokens.base64Url(fasterPromise) + "." + parts[3])
+                .isEqualTo(Reason.TAMPERED);
+        assertRejected(parts[0] + "." + parts[1] + "." + Tokens.base64Url(elsewhere) + "." + parts[3])
+                .isEqualTo(Reason.TAMPERED);
     }
 
     @Test
     void aTokenWhoseSignatureWasAlteredIsTampered() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
+        String token = issue(codec).token();
         char last = token.charAt(token.length() - 1);
 
-        String forged = token.substring(0, token.length() - 1) + (last == 'A' ? 'B' : 'A');
-
-        assertRejected(forged, BREAKFAST).isEqualTo(Reason.TAMPERED);
+        assertRejected(token.substring(0, token.length() - 1) + (last == 'A' ? 'B' : 'A'))
+                .isEqualTo(Reason.TAMPERED);
     }
 
     @Test
     void aTokenSignedWithAnotherSecretUnderTheSameKeyIdIsTampered() {
-        String forged = codec(Map.of("k1", key(9)), "k1")
-                .issue(QUOTE, Basket.of(BREAKFAST))
-                .token();
-
-        assertRejected(forged, BREAKFAST).isEqualTo(Reason.TAMPERED);
-    }
-
-    @Test
-    void aTokenIsValidUntilTheSecondItExpires() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
-
-        clock.set(EXPIRES_AT.minusMillis(1));
-        assertThat(codec.verify(token, BREAKFAST).expiresAt()).isEqualTo(EXPIRES_AT);
-
-        clock.set(EXPIRES_AT);
-        assertRejected(token, BREAKFAST).isEqualTo(Reason.EXPIRED);
-
-        clock.advance(Duration.ofHours(1));
-        assertRejected(token, BREAKFAST).isEqualTo(Reason.EXPIRED);
+        assertRejected(issue(codec(Map.of("k1", key(9)), "k1")).token()).isEqualTo(Reason.TAMPERED);
     }
 
     @Test
     void aTokenSignedWithAnUnknownKeyIsMalformed() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
-
-        assertRejected(token.replaceFirst("^v1\\.k1\\.", "v1.k9."), BREAKFAST).isEqualTo(Reason.MALFORMED);
+        assertRejected(issue(codec).token().replaceFirst("^v1\\.k1\\.", "v1.k9."))
+                .isEqualTo(Reason.MALFORMED);
     }
 
     @ParameterizedTest
@@ -173,57 +128,54 @@ class PromiseTokenCodecTest {
                 "v1.k1.cGF5+bG9hZA.c2ln"
             })
     void somethingThatIsNotAPromiseTokenIsMalformed(String token) {
-        assertRejected(token, BREAKFAST).isEqualTo(Reason.MALFORMED);
+        assertRejected(token).isEqualTo(Reason.MALFORMED);
     }
 
     @Test
     void anOversizedTokenIsMalformedWithoutFurtherWork() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
-
-        assertRejected(token + "A".repeat(PromiseTokenCodec.MAX_TOKEN_LENGTH), BREAKFAST)
+        assertRejected(issue(codec).token() + "A".repeat(PromiseTokenCodec.MAX_TOKEN_LENGTH))
                 .isEqualTo(Reason.MALFORMED);
     }
 
-    @Test
-    void aCorrectlySignedPayloadThatIsNotAPromiseIsMalformed() throws Exception {
-        assertRejected(Tokens.sign("k1", key(1), "not|a|promise"), BREAKFAST).isEqualTo(Reason.MALFORMED);
-    }
-
-    @Test
-    void theSignatureIsCheckedBeforeTheExpiryAndTheExpiryBeforeTheBasket() {
-        String token = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
-        clock.set(EXPIRES_AT.plusSeconds(1));
-
-        assertRejected(token + "x", BREAKFAST).isEqualTo(Reason.TAMPERED);
-        assertRejected(token, List.of(SkuQuantity.of("EGGS-12", 1))).isEqualTo(Reason.EXPIRED);
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "not|a|promise",
+                // the seven fields of an earlier draft, without the location
+                "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|1790078400|1790078490|hash",
+                // a latitude off the globe
+                "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|1790078400|1790078490|hash|95000000|0"
+            })
+    void aCorrectlySignedPayloadThatIsNotAPromiseIsMalformed(String payload) throws Exception {
+        assertRejected(Tokens.sign("k1", key(1), payload)).isEqualTo(Reason.MALFORMED);
     }
 
     @Test
     void keysRotateWithoutInvalidatingTokensInFlight() {
-        String signedWithOldKey = codec.issue(QUOTE, Basket.of(BREAKFAST)).token();
+        String signedWithOldKey = issue(codec).token();
 
         // Step 1: every instance gets the new key and makes it active; the old key still verifies.
         PromiseTokenCodec rotated = codec(Map.of("k1", key(1), "k2", key(2)), "k2");
-        String signedWithNewKey = rotated.issue(QUOTE, Basket.of(BREAKFAST)).token();
+        String signedWithNewKey = issue(rotated).token();
 
         assertThat(signedWithNewKey).startsWith("v1.k2.");
-        assertThat(rotated.verify(signedWithOldKey, BREAKFAST)).isNotNull();
-        assertThat(rotated.verify(signedWithNewKey, BREAKFAST)).isNotNull();
+        assertThat(rotated.authenticate(signedWithOldKey).storeId()).isEqualTo(QUOTE.storeId());
+        assertThat(rotated.authenticate(signedWithNewKey).storeId()).isEqualTo(QUOTE.storeId());
 
         // Step 2, once old tokens have expired anyway: the old key is removed.
         PromiseTokenCodec retired = codec(Map.of("k2", key(2)), "k2");
 
-        assertThat(retired.verify(signedWithNewKey, BREAKFAST)).isNotNull();
+        assertThat(retired.authenticate(signedWithNewKey).storeId()).isEqualTo(QUOTE.storeId());
         assertThatExceptionOfType(InvalidPromiseException.class)
-                .isThrownBy(() -> retired.verify(signedWithOldKey, BREAKFAST))
+                .isThrownBy(() -> retired.authenticate(signedWithOldKey))
                 .extracting(InvalidPromiseException::reason)
                 .isEqualTo(Reason.MALFORMED);
     }
 
     @Test
     void everyPromiseHasItsOwnId() {
-        IssuedPromise first = codec.issue(QUOTE, Basket.of(BREAKFAST));
-        IssuedPromise second = codec.issue(QUOTE, Basket.of(BREAKFAST));
+        IssuedPromise first = issue(codec);
+        IssuedPromise second = issue(codec);
 
         assertThat(first.promiseId()).isNotEqualTo(second.promiseId());
         assertThat(first.token()).isNotEqualTo(second.token());
@@ -238,10 +190,14 @@ class PromiseTokenCodecTest {
                 .isThrownBy(() -> new PromiseTokenCodec(keys, Duration.ofMinutes(61), clock));
     }
 
-    private AbstractObjectAssert<?, Reason> assertRejected(String token, List<SkuQuantity> lines) {
+    private AbstractObjectAssert<?, Reason> assertRejected(String token) {
         return assertThatExceptionOfType(InvalidPromiseException.class)
-                .isThrownBy(() -> codec.verify(token, lines))
+                .isThrownBy(() -> codec.authenticate(token))
                 .extracting(InvalidPromiseException::reason);
+    }
+
+    private static IssuedPromise issue(PromiseTokenCodec codec) {
+        return codec.issue(QUOTE, Basket.of(BREAKFAST), CUSTOMER);
     }
 
     private PromiseTokenCodec codec(Map<String, byte[]> keys, String activeKeyId) {
