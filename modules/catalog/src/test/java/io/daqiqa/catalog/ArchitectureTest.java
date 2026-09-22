@@ -1,0 +1,19 @@
+package io.daqiqa.catalog;
+
+import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.importer.ClassFileImporter;
+import com.tngtech.archunit.core.importer.ImportOption;
+import io.daqiqa.testing.architecture.ArchitectureRules;
+import org.junit.jupiter.api.Test;
+
+class ArchitectureTest {
+
+    private static final JavaClasses CLASSES = new ClassFileImporter()
+            .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
+            .importPackages("io.daqiqa.catalog");
+
+    @Test
+    void respectsModuleArchitecture() {
+        ArchitectureRules.moduleRules("catalog").check(CLASSES);
+    }
+}

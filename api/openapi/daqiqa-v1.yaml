@@ -1,0 +1,556 @@
+openapi: 3.1.0
+info:
+  title: Daqiqa API
+  version: 1.0.0
+  summary: Delivery promises you can trust, in minutes.
+  description: |
+    Daqiqa decides, per basket and address, how fast a quick-commerce order can really arrive, holds the exact items
+    so they can never be oversold, and turns the promise into an order safely.
+
+    Conventions (see docs/engineering/conventions.md):
+    - JSON bodies use camelCase. Money is `{amountMinor, currency}` in minor units (fils, halalas).
+    - Errors are RFC 9457 problem details (`application/problem+json`) with a stable machine-readable `code`.
+    - Mutating endpoints that create business facts require an `Idempotency-Key` header: retries are safe.
+    - Lists use keyset pagination (`cursor`) where they can grow without bound.
+  license:
+    name: Proprietary (portfolio project)
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: Promises
+    description: How fast can this basket reach this address?
+  - name: Orders
+    description: Turn a promise into an order.
+  - name: Stores
+    description: Dark stores and their operational status.
+  - name: Stock
+    description: What each store holds.
+  - name: Catalog
+    description: What we sell.
+
+paths:
+  /v1/promises:
+    post:
+      tags: [Promises]
+      operationId: createPromise
+      summary: Promise a delivery time for a basket at a location
+      description: |
+        Finds the fastest dark store that can deliver the whole basket to the location and returns the promised
+        ETA, its tier, a breakdown of where the minutes go, and a signed token valid for a short window (90 s by
+        default). The token is required to place the order.
+
+        "We cannot deliver this" is a normal answer (`status: UNAVAILABLE`), not an error. When a faster option
+        exists by dropping items, `suggestions` says so.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromiseRequest' }
+            example:
+              location: { latitude: 25.0772, longitude: 55.1390 }
+              items:
+                - { sku: MILK-FULL-1L, quantity: 2 }
+                - { sku: BREAD-ARABIC-6PK, quantity: 1 }
+      responses:
+        '200':
+          description: A promise, or the reason there is none.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromiseResponse' }
+              example:
+                status: AVAILABLE
+                offer:
+                  promiseId: 0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11
+                  storeId: DXB-MARINA
+                  tier: EXPRESS_15
+                  etaMinutes: 12
+                  expiresAt: '2026-09-22T12:01:30Z'
+                  token: v1.k1.MDE5MmY3YzQtN2MxZS03Y2MyLTlkM2EtMmYxYTZjMGU5YjExfERYQi1NQVJJTkF8...
+                  breakdown: { queueSeconds: 120, pickSeconds: 96, riderWaitSeconds: 60, travelSeconds: 330, bufferSeconds: 90 }
+                suggestions: []
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /v1/orders:
+    post:
+      tags: [Orders]
+      operationId: placeOrder
+      summary: Place an order under a promise
+      description: |
+        Verifies the promise token (signature, expiry, same basket), holds the items at the promised store, takes
+        payment and confirms the order. Retrying with the same `Idempotency-Key` returns the original outcome
+        instead of creating a second order.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlaceOrderRequest' }
+      responses:
+        '201':
+          description: Order confirmed.
+          headers:
+            Location:
+              schema: { type: string }
+              description: URL of the new order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '402':
+          description: Payment declined (`PAYMENT_DECLINED`). Nothing is held.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: |
+            `OUT_OF_STOCK`: an item sold out after the promise was made (`shortages` lists what is missing; ask for a
+            new promise). `IDEMPOTENCY_REQUEST_IN_PROGRESS`: the same key is still being processed; retry later.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            The request is well-formed but cannot be honoured: `PROMISE_EXPIRED`, `PROMISE_INVALID`,
+            `PROMISE_CART_MISMATCH`, `UNKNOWN_SKU`, or `IDEMPOTENCY_KEY_REUSED` (same key, different request).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/orders/{orderId}:
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get an order
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/stores:
+    get:
+      tags: [Stores]
+      operationId: listStores
+      summary: List dark stores
+      responses:
+        '200':
+          description: Every store, ordered by id.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StoreList' }
+
+  /v1/stores/{storeId}:
+    get:
+      tags: [Stores]
+      operationId: getStore
+      summary: Get a dark store
+      parameters:
+        - $ref: '#/components/parameters/StoreId'
+      responses:
+        '200':
+          description: The store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Store' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/stores/{storeId}/status:
+    put:
+      tags: [Stores]
+      operationId: setStoreStatus
+      summary: Change a store's operational status
+      description: |
+        Used by store operations (and by chaos drills). Pausing or closing a store removes it from promises
+        immediately; `BUSY` keeps it but lengthens its promises.
+      parameters:
+        - $ref: '#/components/parameters/StoreId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreStatusUpdate' }
+      responses:
+        '200':
+          description: The updated store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Store' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/stores/{storeId}/stock:
+    get:
+      tags: [Stock]
+      operationId: getStock
+      summary: Stock levels for some SKUs at a store
+      parameters:
+        - $ref: '#/components/parameters/StoreId'
+        - name: sku
+          in: query
+          required: true
+          description: One or more SKUs (repeat the parameter), at most 100.
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            items: { $ref: '#/components/schemas/Sku' }
+          style: form
+          explode: true
+      responses:
+        '200':
+          description: Levels for every requested SKU (zeros for SKUs the store does not stock).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockLevels' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/stores/{storeId}/stock/adjustments:
+    post:
+      tags: [Stock]
+      operationId: adjustStock
+      summary: Record a stock change (delivery received, damage, count correction)
+      parameters:
+        - $ref: '#/components/parameters/StoreId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StockAdjustmentRequest' }
+      responses:
+        '200':
+          description: The stock level after the adjustment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockLevel' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`STOCK_BELOW_RESERVED`: the change would leave fewer units on hand than are already promised to orders.'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: '`UNKNOWN_SKU`: the SKU is not in the catalog.'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/products:
+    get:
+      tags: [Catalog]
+      operationId: browseProducts
+      summary: Browse the catalog
+      parameters:
+        - name: category
+          in: query
+          schema: { $ref: '#/components/schemas/Category' }
+        - name: cursor
+          in: query
+          description: '`nextCursor` from the previous page.'
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: One page of products in SKU order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /v1/products/{sku}:
+    get:
+      tags: [Catalog]
+      operationId: getProduct
+      summary: Get a product
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Sku' }
+      responses:
+        '200':
+          description: The product.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Product' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated key (a UUID is ideal). Scoped to the customer; kept for 24 hours.
+      schema: { type: string, minLength: 8, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+    StoreId:
+      name: storeId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/StoreId' }
+
+  responses:
+    BadRequest:
+      description: Malformed or invalid input (`VALIDATION_FAILED`, `INVALID_REQUEST`, `IDEMPOTENCY_KEY_MISSING`).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: No such resource (`STORE_NOT_FOUND`, `ORDER_NOT_FOUND`, `PRODUCT_NOT_FOUND`).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Sku:
+      type: string
+      pattern: '^[A-Z0-9][A-Z0-9-]{2,39}$'
+      examples: [MILK-FULL-1L]
+    StoreId:
+      type: string
+      pattern: '^[A-Z]{3}(-[A-Z0-9]+)+$'
+      maxLength: 40
+      examples: [DXB-MARINA]
+    GeoPoint:
+      type: object
+      required: [latitude, longitude]
+      properties:
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+    Money:
+      type: object
+      required: [amountMinor, currency]
+      properties:
+        amountMinor: { type: integer, format: int64, description: 'Minor units, e.g. 1250 = 12.50 AED' }
+        currency: { type: string, minLength: 3, maxLength: 3, examples: [AED] }
+    LocalizedName:
+      type: object
+      required: [en, ar]
+      properties:
+        en: { type: string }
+        ar: { type: string }
+    CartLine:
+      type: object
+      required: [sku, quantity]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        quantity: { type: integer, minimum: 1, maximum: 99 }
+    DeliveryTier:
+      type: string
+      enum: [EXPRESS_15, STANDARD_30, EXTENDED_60]
+
+    PromiseRequest:
+      type: object
+      required: [location, items]
+      properties:
+        location: { $ref: '#/components/schemas/GeoPoint' }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: '#/components/schemas/CartLine' }
+    PromiseResponse:
+      type: object
+      required: [status, suggestions]
+      properties:
+        status:
+          type: string
+          enum: [AVAILABLE, UNAVAILABLE]
+        offer:
+          $ref: '#/components/schemas/PromiseOffer'
+          description: Present when status is AVAILABLE.
+        unavailableReason:
+          type: string
+          enum: [OUT_OF_COVERAGE, OUT_OF_STOCK, NO_CAPACITY]
+          description: |
+            Present when status is UNAVAILABLE. OUT_OF_COVERAGE: no open store serves the location. OUT_OF_STOCK: no
+            covering store has the whole basket. NO_CAPACITY: a store has it but cannot deliver within the slowest tier.
+        suggestions:
+          type: array
+          items: { $ref: '#/components/schemas/Suggestion' }
+    PromiseOffer:
+      type: object
+      required: [promiseId, storeId, tier, etaMinutes, expiresAt, token, breakdown]
+      properties:
+        promiseId: { type: string, format: uuid }
+        storeId: { $ref: '#/components/schemas/StoreId' }
+        tier: { $ref: '#/components/schemas/DeliveryTier' }
+        etaMinutes: { type: integer, minimum: 1 }
+        expiresAt: { type: string, format: date-time, description: 'Place the order before this instant.' }
+        token: { type: string, description: 'Opaque, signed. Pass it unchanged to POST /v1/orders.' }
+        breakdown: { $ref: '#/components/schemas/EtaBreakdown' }
+    EtaBreakdown:
+      type: object
+      description: Where the minutes go. The ETA is the sum, rounded up to whole minutes.
+      required: [queueSeconds, pickSeconds, riderWaitSeconds, travelSeconds, bufferSeconds]
+      properties:
+        queueSeconds: { type: integer, description: 'Waiting for a picker at the store.' }
+        pickSeconds: { type: integer, description: 'Picking and packing the basket.' }
+        riderWaitSeconds: { type: integer, description: 'Waiting for a rider to be free at the store.' }
+        travelSeconds: { type: integer, description: 'Riding from the store to the location.' }
+        bufferSeconds: { type: integer, description: 'Safety margin, calibrated from how late past deliveries were.' }
+    Suggestion:
+      type: object
+      required: [type, storeId, etaMinutes, tier, skus]
+      properties:
+        type:
+          type: string
+          enum: [REMOVE_ITEMS]
+          description: 'REMOVE_ITEMS: drop `skus` from the basket to get `etaMinutes` from `storeId`.'
+        skus:
+          type: array
+          items: { $ref: '#/components/schemas/Sku' }
+        storeId: { $ref: '#/components/schemas/StoreId' }
+        etaMinutes: { type: integer }
+        tier: { $ref: '#/components/schemas/DeliveryTier' }
+
+    PlaceOrderRequest:
+      type: object
+      required: [promiseToken, customerId, items, deliveryLocation, paymentMethod]
+      properties:
+        promiseToken: { type: string }
+        customerId: { type: string, format: uuid }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: '#/components/schemas/CartLine' }
+        deliveryLocation: { $ref: '#/components/schemas/GeoPoint' }
+        paymentMethod:
+          type: string
+          enum: [CARD, CASH_ON_DELIVERY]
+    OrderStatus:
+      type: string
+      enum: [AWAITING_PAYMENT, CONFIRMED, PAYMENT_FAILED, ABANDONED, CANCELLED]
+    Order:
+      type: object
+      required: [orderId, status, storeId, customerId, promiseId, tier, etaMinutes, placedAt, deliverBy, paymentMethod, items, total]
+      properties:
+        orderId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        storeId: { $ref: '#/components/schemas/StoreId' }
+        customerId: { type: string, format: uuid }
+        promiseId: { type: string, format: uuid }
+        tier: { $ref: '#/components/schemas/DeliveryTier' }
+        etaMinutes: { type: integer }
+        placedAt: { type: string, format: date-time }
+        deliverBy: { type: string, format: date-time, description: 'placedAt + etaMinutes: the promise we must keep.' }
+        paymentMethod: { type: string, enum: [CARD, CASH_ON_DELIVERY] }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderLine' }
+        total: { $ref: '#/components/schemas/Money' }
+    OrderLine:
+      type: object
+      required: [sku, name, quantity, unitPrice, lineTotal]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        name: { $ref: '#/components/schemas/LocalizedName' }
+        quantity: { type: integer }
+        unitPrice: { $ref: '#/components/schemas/Money' }
+        lineTotal: { $ref: '#/components/schemas/Money' }
+
+    StoreStatus:
+      type: string
+      enum: [OPEN, BUSY, PAUSED, CLOSED]
+    Store:
+      type: object
+      required: [id, name, location, status, activePickers, serviceRadiusMeters]
+      properties:
+        id: { $ref: '#/components/schemas/StoreId' }
+        name: { $ref: '#/components/schemas/LocalizedName' }
+        location: { $ref: '#/components/schemas/GeoPoint' }
+        status: { $ref: '#/components/schemas/StoreStatus' }
+        activePickers: { type: integer, minimum: 0 }
+        serviceRadiusMeters: { type: integer }
+    StoreList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Store' }
+    StoreStatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/StoreStatus' }
+
+    StockLevel:
+      type: object
+      required: [sku, onHand, reserved, available]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        onHand: { type: integer, minimum: 0 }
+        reserved: { type: integer, minimum: 0, description: 'Held for orders; never exceeds onHand.' }
+        available: { type: integer, minimum: 0, description: 'onHand - reserved: what can still be sold.' }
+    StockLevels:
+      type: object
+      required: [storeId, items]
+      properties:
+        storeId: { $ref: '#/components/schemas/StoreId' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/StockLevel' }
+    StockAdjustmentRequest:
+      type: object
+      required: [sku, delta, reason]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        delta: { type: integer, minimum: -10000, maximum: 10000, not: { const: 0 }, description: 'Positive adds units, negative removes them.' }
+        reason:
+          type: string
+          enum: [RECEIVED, DAMAGED, EXPIRED, CYCLE_COUNT, CORRECTION]
+
+    Category:
+      type: string
+      enum: [WATER_BEVERAGES, DAIRY_EGGS, BAKERY, FRUITS_VEGETABLES, SNACKS, BABY, PERSONAL_CARE, HOUSEHOLD, PHARMACY, ELECTRONICS]
+    Product:
+      type: object
+      required: [sku, name, category, price]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        name: { $ref: '#/components/schemas/LocalizedName' }
+        category: { $ref: '#/components/schemas/Category' }
+        price: { $ref: '#/components/schemas/Money' }
+    ProductPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Product' }
+        nextCursor: { type: [string, 'null'] }
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details, extended with a stable `code`.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri, examples: ['urn:daqiqa:problem:out-of-stock'] }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code: { type: string, examples: [OUT_OF_STOCK] }
+        shortages:
+          type: array
+          description: Present with OUT_OF_STOCK.
+          items:
+            type: object
+            required: [sku, requested, available]
+            properties:
+              sku: { $ref: '#/components/schemas/Sku' }
+              requested: { type: integer }
+              available: { type: integer }
