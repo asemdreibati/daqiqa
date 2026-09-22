@@ -17,6 +17,7 @@ import io.daqiqa.ordering.domain.PaymentMethod;
 import io.daqiqa.ordering.domain.PromiseTerms;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -80,6 +81,16 @@ class JdbcOrderRepository implements OrderRepository {
         }
         insertLines(order);
         return true;
+    }
+
+    @Override
+    public void capLockWait(Duration timeout) {
+        // set_config(..., true) is SET LOCAL: it takes a parameter, so the value never goes into the SQL text, and it
+        // is undone when the transaction ends, which matters on a pooled connection.
+        jdbc.sql("SELECT set_config('lock_timeout', :timeout, true)")
+                .param("timeout", timeout.toMillis() + "ms")
+                .query(String.class)
+                .single();
     }
 
     @Override

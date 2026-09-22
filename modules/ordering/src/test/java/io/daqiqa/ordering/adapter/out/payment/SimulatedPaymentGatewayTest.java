@@ -15,7 +15,7 @@ class SimulatedPaymentGatewayTest {
     private final SimulatedPaymentGateway gateway = new SimulatedPaymentGateway(new OrderingProperties(
             Duration.ofMinutes(5),
             new OrderingProperties.Idempotency(Duration.ofSeconds(60), Duration.ofHours(24), Duration.ofHours(1), 1000),
-            new OrderingProperties.Sweeper(Duration.ofSeconds(30), 100),
+            new OrderingProperties.Sweeper(Duration.ofSeconds(30), 100, Duration.ofMillis(500)),
             new OrderingProperties.Payment(new BigDecimal("1000.00"), Duration.ZERO)));
 
     @Test

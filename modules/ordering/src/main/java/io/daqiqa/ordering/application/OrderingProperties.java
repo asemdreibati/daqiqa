@@ -79,16 +79,21 @@ public record OrderingProperties(
     /**
      * @param interval pause between two sweeps for abandoned orders
      * @param batchSize orders examined per sweep
+     * @param lockTimeout how long one order's transaction waits for a row lock, the inventory's stock rows included,
+     *     before giving that order up for this sweep. The sweeper is background work behind live checkouts: waiting
+     *     is what it should not do
      */
     public record Sweeper(
             @DefaultValue(Sweeper.DEFAULT_INTERVAL) Duration interval,
-            @DefaultValue("100") int batchSize) {
+            @DefaultValue("100") int batchSize,
+            @DefaultValue("500ms") Duration lockTimeout) {
 
         /** Shared with the {@code @Scheduled} placeholder so the two defaults cannot drift apart. */
         public static final String DEFAULT_INTERVAL = "30s";
 
         public Sweeper {
             requirePositive(interval, "daqiqa.ordering.sweeper.interval");
+            requirePositive(lockTimeout, "daqiqa.ordering.sweeper.lock-timeout");
             if (batchSize <= 0) {
                 throw new IllegalArgumentException("daqiqa.ordering.sweeper.batch-size must be positive");
             }

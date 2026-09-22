@@ -2,6 +2,7 @@ package io.daqiqa.ordering.domain;
 
 import io.daqiqa.kernel.OrderId;
 import io.daqiqa.kernel.PromiseId;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -27,6 +28,13 @@ public interface OrderRepository {
      * {@link #promiseInUse} instead of finding its items already held (which would wrongly read as out of stock).
      */
     void lockPromise(PromiseId promiseId);
+
+    /**
+     * Caps how long every statement in the current transaction waits for a lock ({@code SET LOCAL lock_timeout}),
+     * whatever holds it. A statement that waits longer fails instead, and the caller decides what to do; the cap ends
+     * with the transaction.
+     */
+    void capLockWait(Duration timeout);
 
     /** Whether a live order ({@code AWAITING_PAYMENT} or {@code CONFIRMED}) uses this promise. */
     boolean promiseInUse(PromiseId promiseId);
