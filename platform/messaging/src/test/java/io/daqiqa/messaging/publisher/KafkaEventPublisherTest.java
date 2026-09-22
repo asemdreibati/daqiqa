@@ -114,7 +114,12 @@ class KafkaEventPublisherTest {
     private static MessagingProperties sendTimeout(Duration timeout) {
         return new MessagingProperties(
                 Publisher.KAFKA,
-                new Relay(Duration.ofMillis(250), 100, Duration.ofSeconds(1), Duration.ofMinutes(5)),
+                new Relay(
+                        Duration.ofMillis(250),
+                        100,
+                        Duration.ofSeconds(2),
+                        Duration.ofSeconds(1),
+                        Duration.ofMinutes(5)),
                 Duration.ofDays(7),
                 new Purge(Duration.ofHours(1), 1000),
                 new Kafka(timeout));
