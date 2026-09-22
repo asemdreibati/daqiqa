@@ -138,16 +138,26 @@ class PromiseCalculatorTest {
     }
 
     @Test
+    void theFastestStoreToTheSecondWinsEvenWithinTheSameMinute() {
+        stock(MARINA, Map.of(MILK, 5, BREAD, 5));
+        stock(JLT, Map.of(MILK, 5, BREAD, 5));
+
+        // 609 s and 629 s are both 11 minutes: the store with 20 s more slack wins, although it is farther.
+        assertThat(offer(decide(BREAKFAST, at(MARINA, 330, 2_000), at(JLT, 350, 1_900)))
+                        .storeId())
+                .isEqualTo(MARINA);
+    }
+
+    @Test
     void equallyFastStoresAreDecidedByDistanceThenById() {
         stock(MARINA, Map.of(MILK, 5, BREAD, 5));
         stock(JLT, Map.of(MILK, 5, BREAD, 5));
         stock(BARSHA, Map.of(MILK, 5, BREAD, 5));
 
-        // 609 s and 629 s are both 11 minutes: the nearer store wins, although it is 20 s slower.
-        assertThat(offer(decide(BREAKFAST, at(MARINA, 330, 2_000), at(JLT, 350, 1_900)))
+        assertThat(offer(decide(BREAKFAST, at(MARINA, 330, 2_000), at(JLT, 330, 1_900)))
                         .storeId())
                 .isEqualTo(JLT);
-        // Same minutes, same distance: the smaller id, so the answer never depends on the order of candidates.
+        // Same time, same distance: the smaller id, so the answer never depends on the order of candidates.
         assertThat(offer(decide(BREAKFAST, at(MARINA, 330, 2_000), at(BARSHA, 330, 2_000)))
                         .storeId())
                 .isEqualTo(BARSHA);

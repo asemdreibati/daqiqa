@@ -16,9 +16,10 @@ import java.util.Optional;
  * <ol>
  *   <li>Each store gets an ETA for the basket: its picker queue and rider wait (from its current load), the time to
  *       pick the basket's units, the ride, and the calibrated safety buffer.
- *   <li>The offer comes from the store with the smallest ETA among those able to supply the <em>whole</em> basket;
- *       equal ETAs go to the nearer store, then to the smaller id. No such store: {@code OUT_OF_STOCK}. Its ETA fits no
- *       delivery tier: {@code NO_CAPACITY}. No store at all: {@code OUT_OF_COVERAGE}.
+ *   <li>The offer comes from the store with the smallest ETA, to the second, among those able to supply the
+ *       <em>whole</em> basket; equal times go to the nearer store, then to the smaller id. No such store:
+ *       {@code OUT_OF_STOCK}. Its ETA fits no delivery tier: {@code NO_CAPACITY}. No store at all:
+ *       {@code OUT_OF_COVERAGE}.
  *   <li>Suggestions come from stores that lack some items: without exactly those items (never all of them), the store
  *       must deliver within a tier and strictly sooner than the offer (or at all, when there is no offer). A suggestion
  *       that asks the customer to give up more items than another without being faster is pointless and left out. At
@@ -29,8 +30,11 @@ public final class PromiseCalculator {
 
     public static final int MAX_SUGGESTIONS = 2;
 
-    /** Fastest first; equal ETAs go to the nearer store, then to the smaller id, so the decision is deterministic. */
-    private static final Comparator<Estimate> FASTEST = Comparator.comparingInt(Estimate::etaMinutes)
+    /**
+     * Fastest first, to the second: within the same minute, the store with more slack is more likely to keep the
+     * promise. Equal times go to the nearer store, then to the smaller id, so the decision is deterministic.
+     */
+    private static final Comparator<Estimate> FASTEST = Comparator.comparingInt(Estimate::totalSeconds)
             .thenComparingInt(estimate -> estimate.candidate().distanceMeters())
             .thenComparing(estimate -> estimate.candidate().storeId().value());
 
@@ -122,6 +126,10 @@ public final class PromiseCalculator {
 
     /** One store's ETA for the whole basket ({@code removed} is empty) or for the part of it the store can supply. */
     private record Estimate(Candidate candidate, EtaBreakdown breakdown, List<Sku> removed) {
+
+        int totalSeconds() {
+            return breakdown.totalSeconds();
+        }
 
         int etaMinutes() {
             return breakdown.etaMinutes();

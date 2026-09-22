@@ -79,12 +79,12 @@ class PromiseCalculatorPropertiesTest {
     }
 
     @Property
-    void noStoreThatCouldSupplyTheWholeBasketWouldBeFaster(@ForAll("scenarios") Scenario scenario) {
+    void noStoreThatCouldSupplyTheWholeBasketWouldBeFasterToTheSecond(@ForAll("scenarios") Scenario scenario) {
         if (scenario.decide() instanceof PromiseDecision.Offered offered) {
             for (Candidate candidate : scenario.candidates()) {
                 if (scenario.canSupplyAll(candidate.storeId())) {
-                    assertThat(scenario.etaFromAlone(candidate))
-                            .isGreaterThanOrEqualTo(offered.quote().etaMinutes());
+                    assertThat(scenario.secondsFromAlone(candidate))
+                            .isGreaterThanOrEqualTo(offered.quote().breakdown().totalSeconds());
                 }
             }
         }
@@ -187,6 +187,15 @@ class PromiseCalculatorPropertiesTest {
 
         boolean canSupplyAll(StoreId store) {
             return basket.lines().stream().allMatch(line -> stock().covers(store, line));
+        }
+
+        /** How long a candidate that can supply the whole basket would take, were it the only store around. */
+        int secondsFromAlone(Candidate candidate) {
+            return switch (calculator().decide(basket, List.of(candidate), stock())) {
+                case PromiseDecision.Offered offered ->
+                    offered.quote().breakdown().totalSeconds();
+                case PromiseDecision.Unavailable unavailable -> Integer.MAX_VALUE;
+            };
         }
 
         /** The ETA of a candidate that can supply the whole basket, were it the only store around. */
