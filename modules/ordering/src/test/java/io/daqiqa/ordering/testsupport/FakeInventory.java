@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
@@ -72,6 +73,7 @@ public final class FakeInventory implements InventoryReservations {
     private @Nullable RuntimeException nextReserveFailure;
     private final Map<ReservationId, RuntimeException> releaseFailures = new HashMap<>();
     private @Nullable Runnable afterRollbackOfRefusal;
+    private final AtomicReference<@Nullable Gate> nextHeldReservation = new AtomicReference<>();
 
     public FakeInventory(Clock clock, PlatformTransactionManager transactionManager) {
         this.clock = clock;
@@ -110,6 +112,13 @@ public final class FakeInventory implements InventoryReservations {
         locked(() -> afterRollbackOfRefusal = afterRollback);
     }
 
+    /** The next {@link #reserve} waits at the returned gate before doing anything, inside its caller's transaction. */
+    public Gate holdNextReservation() {
+        Gate gate = new Gate();
+        nextHeldReservation.set(gate);
+        return gate;
+    }
+
     /** Releasing this reservation fails with {@code failure} until {@link #reset()}. */
     public void failReleasesOf(ReservationId reservationId, RuntimeException failure) {
         locked(() -> releaseFailures.put(reservationId, failure));
@@ -122,12 +131,17 @@ public final class FakeInventory implements InventoryReservations {
             releaseFailures.clear();
             nextReserveFailure = null;
             afterRollbackOfRefusal = null;
+            nextHeldReservation.set(null);
             return null;
         });
     }
 
     @Override
     public ReservationResult reserve(ReservationRequest request) {
+        Gate gate = nextHeldReservation.getAndSet(null);
+        if (gate != null) {
+            gate.arriveAndWait(); // outside the lock, so other checkouts can reserve meanwhile
+        }
         return locked(() -> {
             RuntimeException failure = nextReserveFailure;
             if (failure != null) {

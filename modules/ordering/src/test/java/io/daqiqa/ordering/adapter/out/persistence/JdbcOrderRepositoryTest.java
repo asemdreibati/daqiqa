@@ -67,7 +67,7 @@ class JdbcOrderRepositoryTest {
     void readsAnOrderBackExactlyAsItWasStoredWithItsSnapshottedLines() {
         Order order = anOrder(PaymentMethod.CARD, NOW);
 
-        orders.insert(order);
+        assertThat(orders.insertUnlessPromiseInUse(order)).isTrue();
 
         assertThat(orders.find(order.id())).contains(order);
         assertThat(jdbc.sql("SELECT deliver_by FROM ordering.customer_order")
@@ -86,7 +86,7 @@ class JdbcOrderRepositoryTest {
     @Test
     void changesTheStatusOnlyFromTheStatusTheCallerSaw() {
         Order order = anOrder(PaymentMethod.CARD, NOW);
-        orders.insert(order);
+        assertThat(orders.insertUnlessPromiseInUse(order)).isTrue();
 
         orders.updateStatus(order.confirmPayment(), OrderStatus.AWAITING_PAYMENT, NOW.plusSeconds(3));
 
@@ -101,7 +101,7 @@ class JdbcOrderRepositoryTest {
         Order older = anOrder(PaymentMethod.CARD, NOW.minus(Duration.ofMinutes(6)));
         Order recent = anOrder(PaymentMethod.CARD, NOW.minus(Duration.ofMinutes(1)));
         Order confirmed = anOrder(PaymentMethod.CASH_ON_DELIVERY, NOW.minus(Duration.ofMinutes(20)));
-        List.of(recent, older, confirmed, oldest).forEach(orders::insert);
+        List.of(recent, older, confirmed, oldest).forEach(orders::insertUnlessPromiseInUse);
         Instant cutoff = NOW.minus(Duration.ofMinutes(5));
 
         assertThat(orders.findAwaitingPaymentPlacedBy(cutoff, 10)).containsExactly(oldest.id(), older.id());
@@ -111,7 +111,7 @@ class JdbcOrderRepositoryTest {
     @Test
     void theSweeperSkipsAnOrderThatACheckoutIsSettlingInsteadOfWaitingForIt() throws Exception {
         Order order = anOrder(PaymentMethod.CARD, NOW);
-        orders.insert(order);
+        assertThat(orders.insertUnlessPromiseInUse(order)).isTrue();
 
         try (Connection checkout = DB.dataSource().getConnection()) {
             checkout.setAutoCommit(false);
@@ -133,7 +133,7 @@ class JdbcOrderRepositoryTest {
     @Test
     void theSweeperNeverTakesAnOrderThatNoLongerAwaitsPayment() {
         Order order = anOrder(PaymentMethod.CARD, NOW);
-        orders.insert(order);
+        assertThat(orders.insertUnlessPromiseInUse(order)).isTrue();
         orders.updateStatus(order.failPayment(), OrderStatus.AWAITING_PAYMENT, NOW);
 
         assertThat(inTransaction(() -> orders.lockIfAwaitingPayment(order.id())))
@@ -141,9 +141,55 @@ class JdbcOrderRepositoryTest {
     }
 
     @Test
+    void aPromiseConvertsToAtMostOneLiveOrder() {
+        PromiseId promise = PromiseId.newId();
+        Order first = anOrder(PaymentMethod.CARD, NOW, promise);
+        Order second = anOrder(PaymentMethod.CASH_ON_DELIVERY, NOW, promise);
+
+        assertThat(orders.insertUnlessPromiseInUse(first)).isTrue();
+        assertThat(orders.promiseInUse(promise)).isTrue();
+        assertThat(orders.insertUnlessPromiseInUse(second)).isFalse();
+        assertThat(orders.find(second.id())).as("nothing written").isEmpty();
+
+        orders.updateStatus(first.failPayment(), OrderStatus.AWAITING_PAYMENT, NOW);
+
+        assertThat(orders.promiseInUse(promise))
+                .as("a failed order no longer uses its promise")
+                .isFalse();
+        assertThat(orders.insertUnlessPromiseInUse(second)).isTrue();
+        assertThat(orders.find(second.id())).contains(second);
+    }
+
+    @Test
+    void anAbandonedOrderNoLongerUsesItsPromise() {
+        PromiseId promise = PromiseId.newId();
+        Order abandoned = anOrder(PaymentMethod.CARD, NOW, promise);
+        orders.insertUnlessPromiseInUse(abandoned);
+        orders.updateStatus(abandoned.abandon(), OrderStatus.AWAITING_PAYMENT, NOW);
+
+        assertThat(orders.insertUnlessPromiseInUse(anOrder(PaymentMethod.CARD, NOW, promise)))
+                .isTrue();
+    }
+
+    @Test
+    void theDatabaseRefusesTwoLiveOrdersUnderOnePromise() {
+        PromiseId promise = PromiseId.newId();
+        Order failed = anOrder(PaymentMethod.CARD, NOW, promise);
+        orders.insertUnlessPromiseInUse(failed);
+        orders.updateStatus(failed.failPayment(), OrderStatus.AWAITING_PAYMENT, NOW);
+        orders.insertUnlessPromiseInUse(anOrder(PaymentMethod.CARD, NOW, promise));
+
+        assertThatThrownBy(() -> jdbc.sql("UPDATE ordering.customer_order SET status = 'CONFIRMED' WHERE id = :id")
+                        .param("id", failed.id().value())
+                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("customer_order_one_live_order_per_promise");
+    }
+
+    @Test
     void theDatabaseRefusesACashOnDeliveryOrderWaitingForAPayment() {
         Order order = anOrder(PaymentMethod.CASH_ON_DELIVERY, NOW);
-        orders.insert(order);
+        assertThat(orders.insertUnlessPromiseInUse(order)).isTrue();
 
         assertThatThrownBy(() -> jdbc.sql("UPDATE ordering.customer_order SET status = 'AWAITING_PAYMENT'")
                         .update())
@@ -157,13 +203,17 @@ class JdbcOrderRepositoryTest {
     }
 
     private static Order anOrder(PaymentMethod paymentMethod, Instant placedAt) {
+        return anOrder(paymentMethod, placedAt, PromiseId.newId());
+    }
+
+    private static Order anOrder(PaymentMethod paymentMethod, Instant placedAt, PromiseId promise) {
         PricingResult.Priced basket = (PricingResult.Priced) BasketPricing.price(
                 List.of(new SkuQuantity(DATES.sku(), 1), new SkuQuantity(MILK.sku(), 3)),
                 Map.of(MILK.sku(), MILK, DATES.sku(), DATES));
         return Order.place(
                 OrderId.newId(),
                 CustomerId.newId(),
-                new PromiseTerms(PromiseId.newId(), StoreId.of("DXB-MARINA"), "EXPRESS_15", 12),
+                new PromiseTerms(promise, StoreId.of("DXB-MARINA"), "EXPRESS_15", 12),
                 placedAt,
                 GeoPoint.of(25.0772, 55.139),
                 paymentMethod,

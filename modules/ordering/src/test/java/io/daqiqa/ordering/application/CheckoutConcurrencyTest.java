@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.daqiqa.contracts.events.OrderPlacedV1;
 import io.daqiqa.kernel.OrderId;
 import io.daqiqa.ordering.domain.PaymentMethod;
+import io.daqiqa.ordering.testsupport.Gate;
 import io.daqiqa.ordering.testsupport.OrderingIntegrationTest;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.RepeatedTest;
+import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
 /**
@@ -26,6 +28,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 class CheckoutConcurrencyTest extends OrderingIntegrationTest {
 
     private static final int REQUESTS = 20;
+    private static final int KEYS_UNDER_ONE_PROMISE = 8;
 
     @Autowired
     CheckoutService checkout;
@@ -61,6 +64,66 @@ class CheckoutConcurrencyTest extends OrderingIntegrationTest {
                 .allSatisfy(retry ->
                         assertThat(retry).isEqualTo(new CheckoutResponse(placed.orderId(), placed.response(), true)));
         assertExactlyOneOrder(placed.orderId());
+    }
+
+    @RepeatedTest(3)
+    void ofManyKeysRacingUnderOnePromiseExactlyOnePlacesAnOrder() throws Exception {
+        PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2), line(BREAD, 1));
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<CheckoutResponse>> calls = new ArrayList<>();
+
+        try (ExecutorService callers = Executors.newFixedThreadPool(KEYS_UNDER_ONE_PROMISE)) {
+            for (int i = 0; i < KEYS_UNDER_ONE_PROMISE; i++) {
+                String key = "promise-race-key-" + i;
+                calls.add(callers.submit(() -> {
+                    start.await();
+                    return checkout.placeOrder(key, command);
+                }));
+            }
+            start.countDown();
+        }
+
+        List<CheckoutResponse> responses = new ArrayList<>();
+        for (Future<CheckoutResponse> call : calls) {
+            responses.add(call.get(30, TimeUnit.SECONDS));
+        }
+        List<CheckoutResponse> placed = responses.stream()
+                .filter(response -> response.response().status() == 201)
+                .toList();
+        assertThat(placed).hasSize(1);
+        assertThat(responses)
+                .filteredOn(response -> response.response().status() != 201)
+                .hasSize(KEYS_UNDER_ONE_PROMISE - 1)
+                .allSatisfy(refused -> {
+                    assertThat(refused.response().status()).isEqualTo(409);
+                    assertThat(refused.response().body()).contains("PROMISE_ALREADY_USED");
+                    assertThat(inventory.reservationsFor(refused.orderId().toString()))
+                            .as("a losing checkout's hold was rolled back with it")
+                            .isEmpty();
+                });
+        assertExactlyOneOrder(placed.getFirst().orderId());
+    }
+
+    @Test
+    void aCheckoutThatLosesThePromiseRaceAfterHoldingStockGivesTheStockBack() throws Exception {
+        PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2), line(BREAD, 1));
+        Gate reserving = inventory.holdNextReservation();
+
+        try (ExecutorService attemptA = Executors.newSingleThreadExecutor()) {
+            Future<CheckoutResponse> loser = attemptA.submit(() -> checkout.placeOrder("promise-race-key-a", command));
+            reserving.awaitArrival(); // A found the promise unused and is about to hold the stock
+            CheckoutResponse winner = checkout.placeOrder("promise-race-key-b", command); // B commits its order first
+            reserving.open();
+            CheckoutResponse refused = loser.get(30, TimeUnit.SECONDS);
+
+            assertThat(winner.response().status()).isEqualTo(201);
+            assertThat(refused.response().status()).isEqualTo(409);
+            assertThat(refused.response().body()).contains("PROMISE_ALREADY_USED");
+            assertThat(inventory.reservationsFor(refused.orderId().toString()))
+                    .as("A's hold was rolled back with its order")
+                    .isEmpty();
+            assertExactlyOneOrder(winner.orderId());
+        }
     }
 
     private void assertExactlyOneOrder(OrderId orderId) {

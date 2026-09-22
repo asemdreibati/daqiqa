@@ -69,6 +69,12 @@ final class Problems {
                                 "Invalid promise",
                                 "The promise token is not one we issued, or it was altered.");
                 };
+            case CheckoutRejection.PromiseAlreadyUsed used ->
+                of(
+                        HttpStatus.CONFLICT,
+                        "PROMISE_ALREADY_USED",
+                        "Promise already used",
+                        "An order was already placed under this promise. Ask for a new promise to order again.");
             case CheckoutRejection.UnknownSkus unknown ->
                 of(
                         HttpStatus.UNPROCESSABLE_CONTENT,

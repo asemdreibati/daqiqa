@@ -1,6 +1,7 @@
 package io.daqiqa.ordering.domain;
 
 import io.daqiqa.kernel.OrderId;
+import io.daqiqa.kernel.PromiseId;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -11,8 +12,17 @@ import java.util.Optional;
  */
 public interface OrderRepository {
 
-    /** Stores a new order with its lines. */
-    void insert(Order order);
+    /**
+     * Stores a new order with its lines, unless another live order ({@code AWAITING_PAYMENT} or {@code CONFIRMED})
+     * already uses its promise: a promise converts to at most one live order.
+     *
+     * @return {@code false}, writing nothing, if the promise is in use; if that order's transaction is still open, this
+     *     waits for it to end first
+     */
+    boolean insertUnlessPromiseInUse(Order order);
+
+    /** Whether a live order ({@code AWAITING_PAYMENT} or {@code CONFIRMED}) uses this promise. */
+    boolean promiseInUse(PromiseId promiseId);
 
     Optional<Order> find(OrderId id);
 

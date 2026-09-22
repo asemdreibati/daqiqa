@@ -100,17 +100,14 @@ class CheckoutTransactions {
      * creating the order.
      */
     Opening open(Claim claim, PlaceOrderCommand command, Admission admission) {
-        return inTransaction(claim, () -> {
-            Optional<Order> existing = orders.lock(claim.orderId());
-            if (existing.isPresent()) {
-                return continueExisting(claim, existing.get());
-            }
-            return switch (admission) {
-                case Admission.Refused(CheckoutRejection rejection) -> new Opening.Settled(reject(claim, rejection));
-                case Admission.Admitted(VerifiedPromise promise, PricingResult.Priced basket) ->
-                    holdAndCreate(claim, command, promise, basket);
-            };
-        });
+        try {
+            return inTransaction(claim, () -> openHeld(claim, command, admission));
+        } catch (PromiseAlreadyUsedException e) {
+            // T1 rolled back, the stock it held included. Store the answer under the claim, unless another attempt
+            // with this key has created the order meanwhile.
+            Admission used = new Admission.Refused(new CheckoutRejection.PromiseAlreadyUsed());
+            return inTransaction(claim, () -> openHeld(claim, command, used));
+        }
     }
 
     /**
@@ -140,6 +137,18 @@ class CheckoutTransactions {
         }
     }
 
+    private Opening openHeld(Claim claim, PlaceOrderCommand command, Admission admission) {
+        Optional<Order> existing = orders.lock(claim.orderId());
+        if (existing.isPresent()) {
+            return continueExisting(claim, existing.get());
+        }
+        return switch (admission) {
+            case Admission.Refused(CheckoutRejection rejection) -> new Opening.Settled(reject(claim, rejection));
+            case Admission.Admitted(VerifiedPromise promise, PricingResult.Priced basket) ->
+                holdAndCreate(claim, command, promise, basket);
+        };
+    }
+
     /**
      * An earlier attempt with this key created the order and then stopped (this attempt took its claim over): carry on
      * from the order's status. A hold that has expired meanwhile ends the checkout here rather than after the payment,
@@ -162,6 +171,11 @@ class CheckoutTransactions {
 
     private Opening holdAndCreate(
             Claim claim, PlaceOrderCommand command, VerifiedPromise promise, PricingResult.Priced basket) {
+        // Checked before holding any stock, so a second order under a used promise is told so, not that the first
+        // order's items are out of stock. The insert below settles the race between two new orders.
+        if (orders.promiseInUse(promise.promiseId())) {
+            return new Opening.Settled(reject(claim, new CheckoutRejection.PromiseAlreadyUsed()));
+        }
         ReservationResult reservation = inventory.reserve(
                 new ReservationRequest(promise.storeId(), claim.orderId().toString(), command.lines(), hold));
         return switch (reservation) {
@@ -188,7 +202,9 @@ class CheckoutTransactions {
                 command.paymentMethod(),
                 reservationId,
                 basket);
-        orders.insert(order);
+        if (!orders.insertUnlessPromiseInUse(order)) {
+            throw new PromiseAlreadyUsedException();
+        }
         if (order.status() == OrderStatus.CONFIRMED) {
             // Cash on delivery: there is no payment to wait for, so the order is confirmed in T1.
             inventory.confirm(order.reservationId());

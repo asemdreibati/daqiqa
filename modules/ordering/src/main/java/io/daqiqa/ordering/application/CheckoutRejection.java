@@ -20,6 +20,9 @@ public sealed interface CheckoutRejection {
         }
     }
 
+    /** Another order, placed with another idempotency key, already uses this promise. */
+    record PromiseAlreadyUsed() implements CheckoutRejection {}
+
     /** The basket contains SKUs the catalog does not sell. */
     record UnknownSkus(List<Sku> skus) implements CheckoutRejection {
 

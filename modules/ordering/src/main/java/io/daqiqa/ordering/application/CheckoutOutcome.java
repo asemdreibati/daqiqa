@@ -13,6 +13,7 @@ enum CheckoutOutcome {
     PROMISE_CART_MISMATCH,
     PROMISE_LOCATION_MISMATCH,
     STORE_UNAVAILABLE,
+    PROMISE_ALREADY_USED,
     UNKNOWN_SKU,
     /** Answered with the response stored by an earlier request with the same key. */
     REPLAYED,
@@ -35,6 +36,7 @@ enum CheckoutOutcome {
                     case STORE_UNAVAILABLE -> STORE_UNAVAILABLE;
                     case MALFORMED, TAMPERED -> PROMISE_INVALID;
                 };
+            case CheckoutRejection.PromiseAlreadyUsed used -> PROMISE_ALREADY_USED;
             case CheckoutRejection.UnknownSkus unknown -> UNKNOWN_SKU;
             case CheckoutRejection.OutOfStock outOfStock -> OUT_OF_STOCK;
             case CheckoutRejection.PaymentDeclined declined -> PAYMENT_DECLINED;

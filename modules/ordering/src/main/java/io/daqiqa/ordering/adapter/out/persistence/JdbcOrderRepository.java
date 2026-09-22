@@ -44,15 +44,18 @@ class JdbcOrderRepository implements OrderRepository {
     }
 
     @Override
-    public void insert(Order order) {
-        jdbc.sql("""
+    public boolean insertUnlessPromiseInUse(Order order) {
+        // The conflict target is the partial unique index on live orders' promise ids: a concurrent checkout under the
+        // same promise makes this insert wait for it, then do nothing if it committed.
+        int inserted = jdbc.sql("""
                         INSERT INTO ordering.customer_order
                             (id, customer_id, promise_id, store_id, tier, eta_minutes, placed_at, deliver_by,
                              delivery_latitude, delivery_longitude, payment_method, reservation_id, total_minor,
                              currency, status, updated_at)
                         VALUES (:id, :customerId, :promiseId, :storeId, :tier, :etaMinutes, :placedAt, :deliverBy,
                                 :latitude, :longitude, :paymentMethod, :reservationId, :totalMinor,
-                                :currency, :status, :placedAt)""")
+                                :currency, :status, :placedAt)
+                        ON CONFLICT (promise_id) WHERE status IN ('AWAITING_PAYMENT', 'CONFIRMED') DO NOTHING""")
                 .param("id", order.id().value())
                 .param("customerId", order.customerId().value())
                 .param("promiseId", order.promise().promiseId().value())
@@ -69,8 +72,27 @@ class JdbcOrderRepository implements OrderRepository {
                 .param("currency", order.total().currency().getCurrencyCode())
                 .param("status", order.status().name())
                 .update();
+        if (inserted == 0) {
+            return false;
+        }
+        insertLines(order);
+        return true;
+    }
+
+    @Override
+    public boolean promiseInUse(PromiseId promiseId) {
+        // Answered from the partial unique index on live orders' promise ids.
+        return Boolean.TRUE.equals(jdbc.sql("""
+                        SELECT EXISTS (SELECT 1 FROM ordering.customer_order
+                                       WHERE promise_id = :promiseId AND status IN ('AWAITING_PAYMENT', 'CONFIRMED'))""")
+                .param("promiseId", promiseId.value())
+                .query(Boolean.class)
+                .single());
+    }
+
+    /** One round trip for the whole basket: the lines travel as parallel arrays and unnest into rows. */
+    private void insertLines(Order order) {
         List<OrderLine> lines = order.lines();
-        // One round trip for the whole basket: the lines travel as parallel arrays and unnest into rows.
         jdbc.sql("""
                         INSERT INTO ordering.order_line
                             (order_id, line_no, sku, name_en, name_ar, quantity, unit_price_minor)

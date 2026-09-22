@@ -41,6 +41,11 @@ CREATE INDEX customer_order_awaiting_payment_idx
 -- "My orders", newest first.
 CREATE INDEX customer_order_customer_placed_idx ON ordering.customer_order (customer_id, placed_at DESC);
 
+-- A promise converts to at most one live order, whatever idempotency keys the client uses. An order whose payment
+-- failed or that was abandoned no longer uses its promise, so the promise may be tried again while it is valid.
+CREATE UNIQUE INDEX customer_order_one_live_order_per_promise
+    ON ordering.customer_order (promise_id) WHERE status IN ('AWAITING_PAYMENT', 'CONFIRMED');
+
 -- Lines are immutable snapshots: the product's name and unit price as they were when the order was priced.
 CREATE TABLE ordering.order_line (
     order_id         uuid   NOT NULL REFERENCES ordering.customer_order (id),

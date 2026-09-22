@@ -40,6 +40,8 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
     @Autowired
     MeterRegistry meters;
 
+    private static final String OTHER_KEY = "0192f7c4-bbbb-7cc2-9d3a-000000000002";
+
     @Test
     void confirmsACardOrderOnceItsPaymentIsApproved() {
         PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2), line(BREAD, 1));
@@ -243,6 +245,37 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
         assertRejected(response, 409, "STORE_UNAVAILABLE");
         assertNothingHeldOrOrdered(response.orderId());
         assertReplayed(command, response);
+    }
+
+    @Test
+    void refusesASecondOrderUnderAPromiseThatAnotherKeyAlreadyUsed() {
+        inventory.stock(STORE, MILK.sku(), 2);
+        PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2));
+        CheckoutResponse first = checkout.placeOrder(KEY, command);
+
+        CheckoutResponse second = checkout.placeOrder(OTHER_KEY, command);
+
+        assertThat(first.response().status()).isEqualTo(201);
+        assertRejected(second, 409, "PROMISE_ALREADY_USED");
+        assertThat(inventory.reservationsFor(second.orderId().toString()))
+                .as("told the promise is used, not that the first order's items are out of stock")
+                .isEmpty();
+        assertThat(rows("ordering.customer_order")).isEqualTo(1);
+        assertThat(checkout.placeOrder(OTHER_KEY, command))
+                .isEqualTo(new CheckoutResponse(second.orderId(), second.response(), true));
+    }
+
+    @Test
+    void aPromiseWhoseOrderFailedCanBeUsedAgainWhileItIsValid() {
+        PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2));
+        payments.decline("Insufficient funds");
+        assertRejected(checkout.placeOrder(KEY, command), 402, "PAYMENT_DECLINED");
+        payments.approve();
+
+        CheckoutResponse retryWithAnotherCard = checkout.placeOrder(OTHER_KEY, command);
+
+        assertThat(retryWithAnotherCard.response().status()).isEqualTo(201);
+        assertThat(orderStatus(retryWithAnotherCard.orderId())).contains("CONFIRMED");
     }
 
     @Test
