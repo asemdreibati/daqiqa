@@ -50,7 +50,11 @@ import tools.jackson.databind.json.JsonMapper;
             "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
             "spring.kafka.producer.acks=all",
             "spring.kafka.producer.properties.enable.idempotence=true",
-            "spring.kafka.producer.properties.linger.ms=0"
+            // The producer settings docs/design/ordering.md recommends for the server.
+            "spring.kafka.producer.properties.max.in.flight.requests.per.connection=5",
+            "spring.kafka.producer.properties.linger.ms=0",
+            "spring.kafka.producer.properties.request.timeout.ms=5000",
+            "spring.kafka.producer.properties.delivery.timeout.ms=8000"
         })
 class OutboxToKafkaTest {
 
