@@ -25,6 +25,8 @@ dependencies {
 
     testImplementation(project(":platform:testing"))
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-validation") // the web slice's own test controller
     testImplementation(libs.archunit)
 }
 

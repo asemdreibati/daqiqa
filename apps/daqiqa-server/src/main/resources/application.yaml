@@ -10,6 +10,9 @@ spring:
     password: ${DAQIQA_DB_PASSWORD:daqiqa}
     hikari:
       maximum-pool-size: ${DAQIQA_DB_POOL_SIZE:20}
+      # An exhausted pool answers 503 TEMPORARILY_UNAVAILABLE within 2 s (GlobalProblemHandler) instead of holding
+      # the request for Hikari's default 30 s. Milliseconds.
+      connection-timeout: 2000
       # Bound every lock wait. A checkout stuck behind a hot stock row fails fast (the client retries with its
       # idempotency key) instead of piling up connections. Scheduled jobs use SKIP LOCKED or try-locks and never wait.
       connection-init-sql: "SET lock_timeout = '3s'"
