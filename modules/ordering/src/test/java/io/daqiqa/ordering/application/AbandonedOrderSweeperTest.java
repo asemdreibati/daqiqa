@@ -5,6 +5,7 @@ import static io.daqiqa.ordering.testsupport.FakeProductCatalog.MILK;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.daqiqa.contracts.events.OrderAbandonedV1;
 import io.daqiqa.inventory.api.ReleaseReason;
 import io.daqiqa.kernel.OrderId;
 import io.daqiqa.kernel.SkuQuantity;
@@ -48,6 +49,9 @@ class AbandonedOrderSweeperTest extends OrderingIntegrationTest {
         assertThat(reservation.status()).isEqualTo(Status.RELEASED);
         assertThat(reservation.releaseReason()).isEqualTo(ReleaseReason.ORDER_ABANDONED);
         assertThat(inventory.available(STORE, MILK.sku())).isEqualTo(10);
+        assertThat(outboxEventTypes())
+                .as("announced, so that any card authorization can be voided")
+                .containsExactly(OrderAbandonedV1.TYPE);
         assertThat(sweeper.sweep()).as("abandoned once").isZero();
     }
 

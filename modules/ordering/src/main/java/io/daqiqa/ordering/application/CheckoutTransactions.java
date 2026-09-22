@@ -9,6 +9,7 @@ import io.daqiqa.inventory.api.Shortage;
 import io.daqiqa.kernel.OrderId;
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.messaging.OutboxWriter;
+import io.daqiqa.ordering.application.CheckoutRejection.HoldExpired;
 import io.daqiqa.ordering.domain.Order;
 import io.daqiqa.ordering.domain.OrderRepository;
 import io.daqiqa.ordering.domain.OrderStatus;
@@ -22,14 +23,16 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.UnexpectedRollbackException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The database transactions of a checkout. Each one first {@linkplain CheckoutClaims#hold holds the claim}, then
- * changes the order, its reservation, its event and its idempotency key together: whatever crashes when, they never
+ * changes the order, its reservation, its events and its idempotency key together: whatever crashes when, they never
  * disagree, and an attempt that stalled past its lease cannot overrule what a newer attempt with the same key decided.
  *
  * <p><b>Why two transactions around the payment rather than one.</b> A card authorization is a remote call that can
@@ -44,6 +47,7 @@ class CheckoutTransactions {
     private final InventoryReservations inventory;
     private final OrderRepository orders;
     private final OutboxWriter outbox;
+    private final OrderAbandonment abandonment;
     private final CheckoutClaims claims;
     private final CheckoutResponseRenderer responses;
     private final TransactionTemplate transaction;
@@ -54,6 +58,7 @@ class CheckoutTransactions {
             InventoryReservations inventory,
             OrderRepository orders,
             OutboxWriter outbox,
+            OrderAbandonment abandonment,
             CheckoutClaims claims,
             CheckoutResponseRenderer responses,
             PlatformTransactionManager transactionManager,
@@ -62,6 +67,7 @@ class CheckoutTransactions {
         this.inventory = inventory;
         this.orders = orders;
         this.outbox = outbox;
+        this.abandonment = abandonment;
         this.claims = claims;
         this.responses = responses;
         this.transaction = new TransactionTemplate(transactionManager);
@@ -83,11 +89,8 @@ class CheckoutTransactions {
         /** The checkout is over: confirmed (cash on delivery) or rejected. */
         record Settled(Settlement settlement) implements Opening {}
 
-        /** The order exists, its stock is held, and it waits for the card payment. */
+        /** The order exists, its stock is still held, and it waits for the card payment. */
         record AwaitingPayment(Order order) implements Opening {}
-
-        /** An earlier attempt with this key already created the order: carry on from its state. */
-        record Resume(Order order) implements Opening {}
     }
 
     /**
@@ -98,9 +101,9 @@ class CheckoutTransactions {
      */
     Opening open(Claim claim, PlaceOrderCommand command, Admission admission) {
         return inTransaction(claim, () -> {
-            Optional<Order> existing = orders.find(claim.orderId());
+            Optional<Order> existing = orders.lock(claim.orderId());
             if (existing.isPresent()) {
-                return new Opening.Resume(existing.get());
+                return continueExisting(claim, existing.get());
             }
             return switch (admission) {
                 case Admission.Refused(CheckoutRejection rejection) -> new Opening.Settled(reject(claim, rejection));
@@ -115,38 +118,46 @@ class CheckoutTransactions {
      * abandoned-order sweeper: whichever comes second sees what the first did.
      */
     Settlement settle(Claim claim, OrderId orderId, PaymentResult payment) {
+        // Set when the inventory refuses the confirmation; read only if T2 then fails to commit.
+        AtomicBoolean confirmationRefused = new AtomicBoolean();
         try {
             return inTransaction(claim, () -> {
                 Order order = lock(orderId);
-                if (order.status() != OrderStatus.AWAITING_PAYMENT) {
-                    return concluded(claim, order);
-                }
-                return switch (payment) {
-                    case PaymentResult.Approved approved -> {
-                        // Throws once the hold has expired: the stock may be sold again, so a late payment must not
-                        // take it. See the catch below.
-                        inventory.confirm(order.reservationId());
-                        Order confirmed = order.confirmPayment();
-                        orders.updateStatus(confirmed, OrderStatus.AWAITING_PAYMENT, now());
-                        yield confirmed(claim, confirmed);
-                    }
-                    case PaymentResult.Declined(String reason) -> {
-                        inventory.release(order.reservationId(), ReleaseReason.PAYMENT_FAILED);
-                        orders.updateStatus(order.failPayment(), OrderStatus.AWAITING_PAYMENT, now());
-                        yield reject(claim, new CheckoutRejection.PaymentDeclined(reason));
-                    }
+                return switch (order.status()) {
+                    case AWAITING_PAYMENT -> recordPayment(claim, order, payment, confirmationRefused);
+                    // The sweeper abandoned it while the payment was in flight, and announced it.
+                    case ABANDONED -> reject(claim, new HoldExpired(paymentOutcome(payment)));
+                    case CONFIRMED, PAYMENT_FAILED -> throw settledWhileInProgress(order);
                 };
             });
-        } catch (ReservationNoLongerHeldException e) {
-            // The payment outlived the hold. T2 rolled back, including anything the inventory wrote while refusing the
-            // confirmation, so the outcome is decided afresh in its own transaction.
-            return abandonAfterExpiredHold(claim, orderId);
+        } catch (UnexpectedRollbackException e) {
+            if (!confirmationRefused.get()) {
+                throw e;
+            }
+            // The inventory marked T2 rollback-only while refusing the late confirmation, which its contract says it
+            // does not do; T2's writes, the abandonment included, are lost. Decide again in a transaction of its own.
+            return abandonAfterRefusedConfirmation(claim, orderId);
         }
     }
 
-    /** States the outcome for an order that an earlier attempt, or the sweeper, took past the payment step. */
-    Settlement conclude(Claim claim, OrderId orderId) {
-        return inTransaction(claim, () -> concluded(claim, lock(orderId)));
+    /**
+     * An earlier attempt with this key created the order and then stopped (this attempt took its claim over): carry on
+     * from the order's status. A hold that has expired meanwhile ends the checkout here rather than after the payment,
+     * which would authorize the card for an order that cannot be confirmed (the sweeper may simply not have run yet).
+     */
+    private Opening continueExisting(Claim claim, Order order) {
+        return switch (order.status()) {
+            case AWAITING_PAYMENT -> {
+                if (holdExpired(order)) {
+                    abandonment.abandon(order, AbandonReason.HOLD_EXPIRED);
+                    yield new Opening.Settled(reject(claim, new HoldExpired(HoldExpired.Payment.NOT_COMPLETED)));
+                }
+                yield new Opening.AwaitingPayment(order);
+            }
+            // The sweeper got there first.
+            case ABANDONED -> new Opening.Settled(reject(claim, new HoldExpired(HoldExpired.Payment.NOT_COMPLETED)));
+            case CONFIRMED, PAYMENT_FAILED -> throw settledWhileInProgress(order);
+        };
     }
 
     private Opening holdAndCreate(
@@ -186,31 +197,48 @@ class CheckoutTransactions {
         return new Opening.AwaitingPayment(order);
     }
 
-    private Settlement abandonAfterExpiredHold(Claim claim, OrderId orderId) {
+    private Settlement recordPayment(
+            Claim claim, Order order, PaymentResult payment, AtomicBoolean confirmationRefused) {
+        return switch (payment) {
+            case PaymentResult.Approved approved -> {
+                try {
+                    inventory.confirm(order.reservationId());
+                } catch (ReservationNoLongerHeldException e) {
+                    // Approved only after the hold expired: the stock may be sold again, so the late payment must not
+                    // take it. The inventory has expired the hold for good (it leaves this transaction intact).
+                    confirmationRefused.set(true);
+                    abandonment.abandon(order, AbandonReason.PAID_AFTER_HOLD_EXPIRED);
+                    yield reject(claim, new HoldExpired(HoldExpired.Payment.AUTHORIZED));
+                }
+                Order confirmed = order.confirmPayment();
+                orders.updateStatus(confirmed, OrderStatus.AWAITING_PAYMENT, now());
+                yield confirmed(claim, confirmed);
+            }
+            case PaymentResult.Declined(String reason) -> {
+                inventory.release(order.reservationId(), ReleaseReason.PAYMENT_FAILED);
+                orders.updateStatus(order.failPayment(), OrderStatus.AWAITING_PAYMENT, now());
+                yield reject(claim, new CheckoutRejection.PaymentDeclined(reason));
+            }
+        };
+    }
+
+    /** T3, the fallback of a T2 that could not commit after the inventory refused a late confirmation. */
+    private Settlement abandonAfterRefusedConfirmation(Claim claim, OrderId orderId) {
         return inTransaction(claim, () -> {
             Order order = lock(orderId);
-            if (order.status() != OrderStatus.AWAITING_PAYMENT) {
-                return concluded(claim, order);
+            switch (order.status()) {
+                case AWAITING_PAYMENT -> abandonment.abandon(order, AbandonReason.PAID_AFTER_HOLD_EXPIRED);
+                case ABANDONED -> {
+                    // The sweeper abandoned it between T2's rollback and now, and announced it.
+                }
+                case CONFIRMED, PAYMENT_FAILED -> throw settledWhileInProgress(order);
             }
-            orders.updateStatus(order.abandon(), OrderStatus.AWAITING_PAYMENT, now());
-            // A no-op if the inventory already expired the hold; puts the stock back if it did not.
-            inventory.release(order.reservationId(), ReleaseReason.ORDER_ABANDONED);
-            return reject(claim, new CheckoutRejection.HoldExpired());
+            return reject(claim, new HoldExpired(HoldExpired.Payment.AUTHORIZED));
         });
     }
 
-    private Settlement concluded(Claim claim, Order order) {
-        if (order.status() == OrderStatus.ABANDONED) {
-            // The sweeper abandoned the order while its payment was in flight.
-            return reject(claim, new CheckoutRejection.HoldExpired());
-        }
-        // Confirming or failing an order completes its claim in the same transaction, and this one holds the claim.
-        throw new IllegalStateException(
-                "Order " + order.id() + " is " + order.status() + " while its checkout is still in progress");
-    }
-
     private Settlement confirmed(Claim claim, Order order) {
-        outbox.append(OrderPlacedEvents.orderPlaced(order, now()));
+        outbox.append(OrderEvents.placed(order, now()));
         return finish(claim, responses.orderPlaced(order), CheckoutOutcome.CONFIRMED);
     }
 
@@ -221,6 +249,11 @@ class CheckoutTransactions {
     private Settlement finish(Claim claim, StoredResponse response, CheckoutOutcome outcome) {
         claims.complete(claim, response);
         return new Settlement(response, outcome);
+    }
+
+    /** Whether the order's stock hold has run out: {@code daqiqa.ordering.hold} after it was placed. */
+    private boolean holdExpired(Order order) {
+        return !clock.instant().isBefore(order.placedAt().plus(hold));
     }
 
     private Order lock(OrderId id) {
@@ -241,5 +274,18 @@ class CheckoutTransactions {
      */
     private Instant now() {
         return clock.instant().truncatedTo(ChronoUnit.MILLIS);
+    }
+
+    private static HoldExpired.Payment paymentOutcome(PaymentResult payment) {
+        return switch (payment) {
+            case PaymentResult.Approved approved -> HoldExpired.Payment.AUTHORIZED;
+            case PaymentResult.Declined declined -> HoldExpired.Payment.DECLINED;
+        };
+    }
+
+    /** Confirming or failing an order completes its claim in the same transaction, and the caller holds the claim. */
+    private static IllegalStateException settledWhileInProgress(Order order) {
+        return new IllegalStateException(
+                "Order " + order.id() + " is " + order.status() + " while its checkout is still in progress");
     }
 }

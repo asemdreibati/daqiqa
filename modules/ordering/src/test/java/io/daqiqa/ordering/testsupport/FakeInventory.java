@@ -21,14 +21,17 @@ import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * In-memory inventory honouring the {@link InventoryReservations} contract: all-or-nothing holds that never oversell,
- * idempotent by reference; a confirm after the hold expired expires it and refuses; release is idempotent. Like the
- * real one it joins the caller's transaction: what it changes inside a Spring transaction is undone if that
- * transaction rolls back. Thread-safe.
+ * idempotent by reference; a confirm after the hold expired expires it and refuses, without touching the caller's
+ * transaction (as the real one documents); release is idempotent. Like the real one it joins the caller's
+ * transaction: what it changes inside a Spring transaction is undone if that transaction rolls back. Thread-safe.
  */
 public final class FakeInventory implements InventoryReservations {
 
@@ -62,14 +65,17 @@ public final class FakeInventory implements InventoryReservations {
     private record Level(int onHand, int reserved) {}
 
     private final Clock clock;
+    private final PlatformTransactionManager transactionManager;
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Key, Level> levels = new HashMap<>();
     private final Map<ReservationId, Reservation> reservations = new LinkedHashMap<>();
     private @Nullable RuntimeException nextReserveFailure;
     private final Map<ReservationId, RuntimeException> releaseFailures = new HashMap<>();
+    private @Nullable Runnable afterRollbackOfRefusal;
 
-    public FakeInventory(Clock clock) {
+    public FakeInventory(Clock clock, PlatformTransactionManager transactionManager) {
         this.clock = clock;
+        this.transactionManager = transactionManager;
     }
 
     public void stock(StoreId store, Sku sku, int onHand) {
@@ -95,6 +101,15 @@ public final class FakeInventory implements InventoryReservations {
         locked(() -> nextReserveFailure = failure);
     }
 
+    /**
+     * From now on, refusing a late confirmation also marks the caller's transaction rollback-only, as a
+     * {@code @Transactional} implementation without {@code noRollbackFor} would; once that transaction has rolled back,
+     * {@code afterRollback} runs (on the caller's thread, with the transaction already gone).
+     */
+    public void refuseLateConfirmationsByRollingBackTheCaller(Runnable afterRollback) {
+        locked(() -> afterRollbackOfRefusal = afterRollback);
+    }
+
     /** Releasing this reservation fails with {@code failure} until {@link #reset()}. */
     public void failReleasesOf(ReservationId reservationId, RuntimeException failure) {
         locked(() -> releaseFailures.put(reservationId, failure));
@@ -106,6 +121,7 @@ public final class FakeInventory implements InventoryReservations {
             reservations.clear();
             releaseFailures.clear();
             nextReserveFailure = null;
+            afterRollbackOfRefusal = null;
             return null;
         });
     }
@@ -161,6 +177,9 @@ public final class FakeInventory implements InventoryReservations {
                     if (!clock.instant().isBefore(reservation.expiresAt())) {
                         // A late confirm must never succeed just because no sweeper has run yet.
                         change(reservation, reservation.becoming(Status.EXPIRED, null), -1);
+                        if (afterRollbackOfRefusal != null) {
+                            markCallerRollbackOnly(afterRollbackOfRefusal);
+                        }
                         throw new ReservationNoLongerHeldException(reservationId, Status.EXPIRED.name());
                     }
                     change(reservation, reservation.becoming(Status.CONFIRMED, null), 0);
@@ -183,6 +202,20 @@ public final class FakeInventory implements InventoryReservations {
             }
             return null;
         });
+    }
+
+    private void markCallerRollbackOnly(Runnable afterRollback) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status == STATUS_ROLLED_BACK) {
+                    afterRollback.run();
+                }
+            }
+        });
+        // A participating scope that ends rollback-only marks the whole transaction so, as an exception leaving a
+        // @Transactional participant does.
+        new TransactionTemplate(transactionManager).executeWithoutResult(TransactionStatus::setRollbackOnly);
     }
 
     private Reservation existing(ReservationId id) {

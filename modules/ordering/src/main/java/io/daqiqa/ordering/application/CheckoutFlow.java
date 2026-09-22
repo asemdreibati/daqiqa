@@ -8,7 +8,6 @@ import io.daqiqa.ordering.application.CheckoutTransactions.Admission;
 import io.daqiqa.ordering.application.CheckoutTransactions.Opening;
 import io.daqiqa.ordering.domain.BasketPricing;
 import io.daqiqa.ordering.domain.Order;
-import io.daqiqa.ordering.domain.OrderStatus;
 import io.daqiqa.ordering.domain.PricingResult;
 import io.daqiqa.ordering.domain.ProductPrice;
 import io.daqiqa.promise.api.InvalidPromiseException;
@@ -24,8 +23,8 @@ import org.springframework.stereotype.Component;
  * stock and creates the order, the card is authorized with no transaction open, T2 records the outcome.
  *
  * <p>An attempt whose order already exists (a retry that took over the claim of a dead instance) learns so in T1 and
- * resumes from the order's state. The promise's verdict is ignored then: it may well have expired by now, and it was
- * honoured when the order was created.
+ * carries on from the order's state: it pays for it if its hold is still live. The promise's verdict is ignored then:
+ * it may well have expired by now, and it was honoured when the order was created.
  */
 @Component
 class CheckoutFlow {
@@ -54,7 +53,6 @@ class CheckoutFlow {
             return switch (transactions.open(claim, command, admit(command))) {
                 case Opening.Settled(Settlement settlement) -> settlement;
                 case Opening.AwaitingPayment(Order order) -> pay(claim, order);
-                case Opening.Resume(Order order) -> resume(claim, order);
             };
         } catch (ClaimSettledException e) {
             return new Settlement(claims.storedResponse(claim), CheckoutOutcome.REPLAYED);
@@ -81,12 +79,6 @@ class CheckoutFlow {
         return catalog.findAll(skus).values().stream()
                 .collect(Collectors.toUnmodifiableMap(
                         Product::sku, product -> new ProductPrice(product.sku(), product.name(), product.price())));
-    }
-
-    private Settlement resume(Claim claim, Order order) {
-        return order.status() == OrderStatus.AWAITING_PAYMENT
-                ? pay(claim, order)
-                : transactions.conclude(claim, order.id());
     }
 
     /** Outside any transaction on purpose: see {@link CheckoutTransactions}. */

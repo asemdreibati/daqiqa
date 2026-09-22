@@ -5,6 +5,7 @@ import static io.daqiqa.ordering.testsupport.FakeProductCatalog.MILK;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.daqiqa.contracts.events.OrderAbandonedV1;
 import io.daqiqa.contracts.events.OrderPlacedV1;
 import io.daqiqa.inventory.api.ReleaseReason;
 import io.daqiqa.kernel.GeoPoint;
@@ -20,6 +21,8 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.json.AbstractJsonContentAssert;
@@ -266,7 +269,7 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
         assertRejected(response, 409, "OUT_OF_STOCK");
         json(response)
                 .extractingPath("$.shortages")
-                .isEqualTo(List.of(java.util.Map.of("sku", "MILK-FULL-1L", "requested", 3, "available", 1)));
+                .isEqualTo(List.of(Map.of("sku", "MILK-FULL-1L", "requested", 3, "available", 1)));
         assertNothingHeldOrOrdered(response.orderId());
         assertThat(payments.authorizations()).isEmpty();
         assertReplayed(command, response);
@@ -288,17 +291,33 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
     }
 
     @Test
-    void abandonsTheOrderWhenThePaymentCompletesAfterTheHoldExpired() {
+    void abandonsTheOrderWhenThePaymentIsApprovedOnlyAfterTheHoldExpired() {
         payments.whileInFlight(() -> clock.advance(Duration.ofMinutes(6)));
         PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2));
 
         CheckoutResponse response = checkout.placeOrder(KEY, command);
 
-        assertRejected(response, 409, "HOLD_EXPIRED");
+        assertHoldExpired(response, "approved only after the items' hold had expired");
+        assertThat(orderStatus(response.orderId())).contains("ABANDONED");
+        assertThat(reservationOf(response.orderId()).status())
+                .as("the inventory's own expiry stands: it left T2 intact")
+                .isEqualTo(Status.EXPIRED);
+        assertThat(inventory.available(STORE, MILK.sku())).isEqualTo(10);
+        assertAbandonedEvent(response.orderId(), "PAID_AFTER_HOLD_EXPIRED");
+        assertReplayed(command, response);
+    }
+
+    @Test
+    void fallsBackToAFreshTransactionWhenTheInventoryRollsBackTheLateConfirmation() {
+        inventory.refuseLateConfirmationsByRollingBackTheCaller(() -> {});
+        payments.whileInFlight(() -> clock.advance(Duration.ofMinutes(6)));
+
+        CheckoutResponse response = checkout.placeOrder(KEY, checkoutOf(PaymentMethod.CARD, line(MILK, 2)));
+
+        assertHoldExpired(response, "approved only after the items' hold had expired");
         assertThat(orderStatus(response.orderId())).contains("ABANDONED");
         assertReleased(response.orderId(), ReleaseReason.ORDER_ABANDONED);
-        assertThat(outboxEventTypes()).isEmpty();
-        assertReplayed(command, response);
+        assertAbandonedEvent(response.orderId(), "PAID_AFTER_HOLD_EXPIRED");
     }
 
     @Test
@@ -310,10 +329,44 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
 
         CheckoutResponse response = checkout.placeOrder(KEY, checkoutOf(PaymentMethod.CARD, line(MILK, 2)));
 
-        assertRejected(response, 409, "HOLD_EXPIRED");
+        assertHoldExpired(response, "approved only after the items' hold had expired");
         assertThat(orderStatus(response.orderId())).contains("ABANDONED");
         assertReleased(response.orderId(), ReleaseReason.ORDER_ABANDONED);
-        assertThat(outboxEventTypes()).isEmpty();
+        assertAbandonedEvent(response.orderId(), "HOLD_EXPIRED");
+    }
+
+    @Test
+    void saysThePaymentWasDeclinedWhenTheSweeperAbandonedTheOrderMeanwhile() {
+        payments.decline("Insufficient funds");
+        payments.whileInFlight(() -> {
+            clock.advance(Duration.ofMinutes(6));
+            assertThat(sweeper.sweep()).isEqualTo(1);
+        });
+
+        CheckoutResponse response = checkout.placeOrder(KEY, checkoutOf(PaymentMethod.CARD, line(MILK, 2)));
+
+        assertHoldExpired(response, "payment was declined and the items' hold expired meanwhile");
+        assertThat(orderStatus(response.orderId())).contains("ABANDONED");
+    }
+
+    @Test
+    void aRetryAfterTheHoldExpiredAbandonsTheOrderInsteadOfAuthorizingTheCardAgain() {
+        PlaceOrderCommand command = checkoutOf(PaymentMethod.CARD, line(MILK, 2));
+        payments.crash();
+        assertThatThrownBy(() -> checkout.placeOrder(KEY, command)).isInstanceOf(SimulatedCrash.class);
+        payments.approve();
+        clock.advance(Duration.ofMinutes(5)); // the hold has run out; the sweeper has not run yet
+
+        CheckoutResponse retry = checkout.placeOrder(KEY, command);
+
+        assertHoldExpired(retry, "before the payment completed");
+        assertThat(payments.authorizations())
+                .as("an order that can no longer be confirmed is not paid for")
+                .hasSize(1);
+        assertThat(orderStatus(retry.orderId())).contains("ABANDONED");
+        assertReleased(retry.orderId(), ReleaseReason.ORDER_ABANDONED);
+        assertAbandonedEvent(retry.orderId(), "HOLD_EXPIRED");
+        assertReplayed(command, retry);
     }
 
     @Test
@@ -327,13 +380,32 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
 
         CheckoutResponse retry = checkout.placeOrder(KEY, command);
 
-        assertRejected(retry, 409, "HOLD_EXPIRED");
+        assertHoldExpired(retry, "before the payment completed");
         assertThat(orderStatus(retry.orderId())).contains("ABANDONED");
         assertThat(payments.authorizations())
                 .as("no payment for an abandoned order")
                 .hasSize(1);
         assertReleased(retry.orderId(), ReleaseReason.ORDER_ABANDONED);
+        assertAbandonedEvent(retry.orderId(), "HOLD_EXPIRED");
         assertReplayed(command, retry);
+    }
+
+    @Test
+    void announcesAnAbandonedCardOrderSoThatItsAuthorizationCanBeVoided() {
+        double before = abandoned("paid_after_hold_expired");
+        payments.whileInFlight(() -> clock.advance(Duration.ofMinutes(6)));
+
+        CheckoutResponse response = checkout.placeOrder(KEY, checkoutOf(PaymentMethod.CARD, line(MILK, 2)));
+
+        assertThat(new JsonContent(outboxPayload())).isLenientlyEqualTo("""
+                {"orderId": "%s", "storeId": "DXB-MARINA", "customerId": "%s", "paymentMethod": "CARD",
+                 "reason": "PAID_AFTER_HOLD_EXPIRED", "paymentAuthorizationMayExist": true, "totalMinor": 1390,
+                 "currency": "AED"}""".formatted(response.orderId(), CUSTOMER));
+        assertThat(jdbc.sql("SELECT partition_key FROM messaging.outbox_event")
+                        .query(String.class)
+                        .single())
+                .isEqualTo(STORE.value());
+        assertThat(abandoned("paid_after_hold_expired")).isEqualTo(before + 1);
     }
 
     @Test
@@ -406,9 +478,27 @@ class CheckoutServiceTest extends OrderingIntegrationTest {
 
     private static void assertRejected(CheckoutResponse response, int status, String code) {
         assertThat(response.response().status()).isEqualTo(status);
-        json(response).isLenientlyEqualTo("""
-                {"type": "urn:daqiqa:problem:%s", "status": %d, "code": "%s", "instance": "/v1/orders"}""".formatted(
-                        code.toLowerCase(java.util.Locale.ROOT).replace('_', '-'), status, code));
+        json(response)
+                .isLenientlyEqualTo("""
+                {"type": "urn:daqiqa:problem:%s", "status": %d, "code": "%s", "instance": "/v1/orders"}""".formatted(code.toLowerCase(Locale.ROOT).replace('_', '-'), status, code));
+    }
+
+    private void assertHoldExpired(CheckoutResponse response, String whatHappenedToThePayment) {
+        assertRejected(response, 409, "HOLD_EXPIRED");
+        json(response).extractingPath("$.detail").asString().contains(whatHappenedToThePayment);
+    }
+
+    /** Exactly one OrderAbandonedV1, for this order, and no OrderPlacedV1. */
+    private void assertAbandonedEvent(OrderId orderId, String reason) {
+        assertThat(outboxEventTypes()).containsExactly(OrderAbandonedV1.TYPE);
+        assertThat(new JsonContent(outboxPayload())).isLenientlyEqualTo("""
+                {"orderId": "%s", "reason": "%s", "paymentAuthorizationMayExist": true}""".formatted(orderId, reason));
+    }
+
+    private double abandoned(String reason) {
+        Counter counter =
+                meters.find("daqiqa.ordering.abandoned").tag("reason", reason).counter();
+        return counter == null ? 0 : counter.count();
     }
 
     private Reservation reservationOf(OrderId orderId) {

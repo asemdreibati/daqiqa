@@ -45,8 +45,24 @@ public sealed interface CheckoutRejection {
     }
 
     /**
-     * The payment completed only after the stock hold had expired, so the items may have been sold to someone else:
-     * the order was abandoned and its stock released.
+     * The stock hold expired before the payment completed, so the items may be sold to someone else: the order was
+     * abandoned and its stock released.
+     *
+     * @param payment what became of the card payment, which decides what the customer is told
      */
-    record HoldExpired() implements CheckoutRejection {}
+    record HoldExpired(Payment payment) implements CheckoutRejection {
+
+        public HoldExpired {
+            Objects.requireNonNull(payment, "payment");
+        }
+
+        public enum Payment {
+            /** It did not complete within the hold: never attempted again after a restart, or its outcome was lost. */
+            NOT_COMPLETED,
+            /** The card was declined. */
+            DECLINED,
+            /** The card was authorized, but only after the hold had expired. */
+            AUTHORIZED
+        }
+    }
 }

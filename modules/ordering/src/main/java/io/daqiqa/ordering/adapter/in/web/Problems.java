@@ -88,13 +88,27 @@ final class Problems {
             case CheckoutRejection.PaymentDeclined declined ->
                 of(HttpStatus.PAYMENT_REQUIRED, "PAYMENT_DECLINED", "Payment declined", declined.reason());
             case CheckoutRejection.HoldExpired expired ->
-                of(
-                        HttpStatus.CONFLICT,
-                        "HOLD_EXPIRED",
-                        "Hold expired",
-                        "The payment completed after the items' hold had expired, so they were released and nothing "
-                                + "was ordered. Ask for a new promise and order again.");
+                of(HttpStatus.CONFLICT, "HOLD_EXPIRED", "Hold expired", holdExpiredDetail(expired.payment()));
         };
+    }
+
+    /** What happened to the payment decides what the customer can be told about their money. */
+    private static String holdExpiredDetail(CheckoutRejection.HoldExpired.Payment payment) {
+        String outcome =
+                switch (payment) {
+                    case NOT_COMPLETED ->
+                        "The items' hold expired before the payment completed, so they were released and nothing was "
+                                + "ordered. You will not be charged; if your bank reserved the amount, it will be "
+                                + "released.";
+                    case DECLINED ->
+                        "The payment was declined and the items' hold expired meanwhile, so they were released and "
+                                + "nothing was ordered.";
+                    case AUTHORIZED ->
+                        "The payment was approved only after the items' hold had expired, so they were released and "
+                                + "nothing was ordered. You will not be charged: the amount your bank reserved will "
+                                + "be released.";
+                };
+        return outcome + " Ask for a new promise and order again.";
     }
 
     private static List<ShortageJson> shortages(List<Shortage> shortages) {
