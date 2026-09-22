@@ -70,9 +70,10 @@ public final class PromiseCalculator {
                 }
             }
             if (missing.isEmpty()) {
-                wholeBasket.add(estimate(candidate, basket.lines(), List.of()));
+                wholeBasket.add(estimate(candidate, basket.totalUnits(), List.of()));
             } else if (!supplied.isEmpty()) {
-                partBasket.add(estimate(candidate, supplied, missing));
+                int units = supplied.stream().mapToInt(SkuQuantity::quantity).sum();
+                partBasket.add(estimate(candidate, units, missing));
             }
         }
 
@@ -87,9 +88,9 @@ public final class PromiseCalculator {
         return new PromiseDecision.Unavailable(reason, suggestions);
     }
 
-    private Estimate estimate(Candidate candidate, List<SkuQuantity> lines, List<Sku> removed) {
+    /** @param units how many units the store would pick: the whole basket, or the part it can supply */
+    private Estimate estimate(Candidate candidate, int units, List<Sku> removed) {
         StoreLoad load = storeLoad.loadAt(candidate.storeId());
-        int units = lines.stream().mapToInt(SkuQuantity::quantity).sum();
         EtaBreakdown breakdown = EtaBreakdown.of(
                 load.pickerQueue(),
                 pickTime.pickTime(units),
