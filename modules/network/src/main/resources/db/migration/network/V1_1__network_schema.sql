@@ -13,6 +13,8 @@ CREATE TABLE network.dark_store (
     status           text             NOT NULL DEFAULT 'CLOSED',
     active_pickers   integer          NOT NULL DEFAULT 0,
     service_radius_m integer          NOT NULL,
+    -- Incremented by every change the application makes, so in-memory views apply changes in commit order.
+    version          bigint           NOT NULL DEFAULT 0,
     created_at       timestamptz      NOT NULL DEFAULT now(),
     updated_at       timestamptz      NOT NULL DEFAULT now(),
     CONSTRAINT dark_store_id_format CHECK (id ~ '^[A-Z]{3}(-[A-Z0-9]+)+$' AND length(id) <= 40),
@@ -21,5 +23,6 @@ CREATE TABLE network.dark_store (
     CONSTRAINT dark_store_longitude_range CHECK (longitude BETWEEN -180 AND 180),
     CONSTRAINT dark_store_status_valid CHECK (status IN ('OPEN', 'BUSY', 'PAUSED', 'CLOSED')),
     CONSTRAINT dark_store_active_pickers_non_negative CHECK (active_pickers >= 0),
-    CONSTRAINT dark_store_service_radius_range CHECK (service_radius_m BETWEEN 500 AND 10000)
+    CONSTRAINT dark_store_service_radius_range CHECK (service_radius_m BETWEEN 500 AND 10000),
+    CONSTRAINT dark_store_version_non_negative CHECK (version >= 0)
 );

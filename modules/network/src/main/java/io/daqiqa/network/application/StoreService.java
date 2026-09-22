@@ -39,15 +39,15 @@ public class StoreService {
     }
 
     /**
-     * Opens, pauses, closes or marks a store busy. Once committed, the change is applied to this instance's coverage
-     * index before this method returns (see {@link NetworkView#onStoreStatusChanged}): a paused store stops receiving
-     * promises immediately.
+     * Opens, pauses, closes or marks a store busy. Once committed, the updated row is applied to this instance's
+     * coverage index before this method returns (see {@link NetworkView#onStoreStatusChanged}): a paused store stops
+     * receiving promises immediately.
      */
     @Transactional
     public DarkStore changeStatus(StoreId id, StoreStatus status) {
         Store store =
                 stores.updateStatus(id, status, clock.instant()).orElseThrow(() -> new StoreNotFoundException(id));
-        events.publishEvent(new StoreStatusChanged(id, status));
+        events.publishEvent(new StoreStatusChanged(store));
         return DarkStores.from(store);
     }
 }

@@ -16,8 +16,8 @@ public final class NetworkDatabase {
     public static void insert(JdbcClient jdbc, Store store) {
         jdbc.sql("""
                 INSERT INTO network.dark_store
-                    (id, name_en, name_ar, latitude, longitude, status, active_pickers, service_radius_m)
-                VALUES (:id, :nameEn, :nameAr, :latitude, :longitude, :status, :activePickers, :radius)
+                    (id, name_en, name_ar, latitude, longitude, status, active_pickers, service_radius_m, version)
+                VALUES (:id, :nameEn, :nameAr, :latitude, :longitude, :status, :activePickers, :radius, :version)
                 """)
                 .param("id", store.id().value())
                 .param("nameEn", store.name().en())
@@ -27,6 +27,7 @@ public final class NetworkDatabase {
                 .param("status", store.status().name())
                 .param("activePickers", store.activePickers())
                 .param("radius", store.serviceRadiusMeters())
+                .param("version", store.version())
                 .update();
     }
 }

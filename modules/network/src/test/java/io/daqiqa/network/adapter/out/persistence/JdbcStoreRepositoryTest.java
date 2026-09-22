@@ -45,7 +45,8 @@ class JdbcStoreRepositoryTest {
                 GeoPoint.of(25.0805, 55.1403),
                 StoreStatus.BUSY,
                 7,
-                3_000);
+                3_000,
+                4);
         NetworkDatabase.insert(jdbc, marina);
 
         assertThat(repository.findById(StoreId.of("DXB-MARINA"))).contains(marina);
@@ -70,7 +71,12 @@ class JdbcStoreRepositoryTest {
         Instant changedAt = Instant.parse("2026-09-22T12:34:56Z");
 
         assertThat(repository.updateStatus(StoreId.of("DXB-MARINA"), StoreStatus.PAUSED, changedAt))
-                .hasValueSatisfying(store -> assertThat(store.status()).isEqualTo(StoreStatus.PAUSED));
+                .hasValueSatisfying(store -> {
+                    assertThat(store.status()).isEqualTo(StoreStatus.PAUSED);
+                    assertThat(store.version())
+                            .as("each change is a new version")
+                            .isEqualTo(2);
+                });
 
         assertThat(repository.findById(StoreId.of("DXB-MARINA")))
                 .hasValueSatisfying(store -> assertThat(store.status()).isEqualTo(StoreStatus.PAUSED));
@@ -97,8 +103,10 @@ class JdbcStoreRepositoryTest {
                 VALUES ('DXB-NEW', 'New', 'جديد', 25.1, 55.2, 2000)
                 """).update();
 
-        assertThat(repository.findById(StoreId.of("DXB-NEW")))
-                .hasValueSatisfying(store -> assertThat(store.status()).isEqualTo(StoreStatus.CLOSED));
+        assertThat(repository.findById(StoreId.of("DXB-NEW"))).hasValueSatisfying(store -> {
+            assertThat(store.status()).isEqualTo(StoreStatus.CLOSED);
+            assertThat(store.version()).isZero();
+        });
     }
 
     @ParameterizedTest
@@ -110,7 +118,8 @@ class JdbcStoreRepositoryTest {
                 "service_radius_m = 10001",
                 "active_pickers = -1",
                 "latitude = 91",
-                "name_ar = ' '"
+                "name_ar = ' '",
+                "version = -1"
             })
     void theDatabaseRejectsAStoreThatBreaksAnInvariant(String violation) {
         NetworkDatabase.insert(jdbc, store("DXB-JLT", JLT, 3_000, StoreStatus.OPEN));

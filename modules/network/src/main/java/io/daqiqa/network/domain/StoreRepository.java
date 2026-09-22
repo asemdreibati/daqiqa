@@ -14,6 +14,9 @@ public interface StoreRepository {
 
     Optional<Store> findById(StoreId id);
 
-    /** Sets the status of a store; returns the updated store, or empty if there is no such store. */
+    /**
+     * Sets the status of a store and increments its version; returns the store as updated, or empty if there is no
+     * such store.
+     */
     Optional<Store> updateStatus(StoreId id, StoreStatus status, Instant changedAt);
 }

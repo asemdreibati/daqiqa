@@ -12,6 +12,9 @@ import java.util.Objects;
  *
  * <p>{@link StoreStatus} is the context's published enum; the domain uses it directly so that "which statuses accept
  * orders" has a single source of truth.
+ *
+ * @param version grows with every committed change to the store, so that a view of the network can tell a newer state
+ *     from an older one, whatever order it learns about them in
  */
 public record Store(
         StoreId id,
@@ -19,7 +22,8 @@ public record Store(
         GeoPoint location,
         StoreStatus status,
         int activePickers,
-        int serviceRadiusMeters) {
+        int serviceRadiusMeters,
+        long version) {
 
     /** Below this a store would cover a handful of buildings: not worth a dark store. */
     public static final int MIN_SERVICE_RADIUS_METERS = 500;
@@ -39,6 +43,9 @@ public record Store(
             throw new IllegalArgumentException(
                     "Service radius of " + id + " must be between " + MIN_SERVICE_RADIUS_METERS + " and "
                             + MAX_SERVICE_RADIUS_METERS + " m, was " + serviceRadiusMeters);
+        }
+        if (version < 0) {
+            throw new IllegalArgumentException("Version of " + id + " cannot be negative, was " + version);
         }
     }
 

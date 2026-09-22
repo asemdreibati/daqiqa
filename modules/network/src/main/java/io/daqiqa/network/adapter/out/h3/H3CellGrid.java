@@ -26,14 +26,15 @@ public final class H3CellGrid implements CellGrid {
 
     /**
      * Upper bound of the centre-to-vertex distance of a cell, as a multiple of the average edge length. Measured at
-     * resolution 9: at most 1.0 in the Gulf and 1.1 anywhere on Earth; 1.5 leaves a wide margin.
+     * resolution 9 (hundreds of thousands of cells): at most 1.03 in the Gulf and 1.10 anywhere on Earth; 1.5 leaves a
+     * wide margin.
      */
     private static final double CELL_RADIUS_IN_EDGES = 1.5;
 
     /**
      * Lower bound of how much farther from the origin each successive ring of a grid disk reaches, as a multiple of
-     * the average edge length. Measured: 1.36 in Dubai (a regular hexagon grid gives 1.5), never below 1.08 anywhere
-     * on Earth; 0.75 leaves a wide margin.
+     * the average edge length. Measured over thousands of origins: at least 1.29 in the Gulf (a regular hexagon grid
+     * gives 1.5) and 1.06 anywhere on Earth; 0.75 leaves a wide margin.
      */
     private static final double RING_SPACING_IN_EDGES = 0.75;
 

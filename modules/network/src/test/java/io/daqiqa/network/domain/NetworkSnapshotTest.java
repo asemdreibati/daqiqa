@@ -2,6 +2,7 @@ package io.daqiqa.network.domain;
 
 import static io.daqiqa.network.StoreFixtures.DUBAI_MARINA;
 import static io.daqiqa.network.StoreFixtures.JLT;
+import static io.daqiqa.network.StoreFixtures.changed;
 import static io.daqiqa.network.StoreFixtures.offset;
 import static io.daqiqa.network.StoreFixtures.openStore;
 import static io.daqiqa.network.StoreFixtures.store;
@@ -107,34 +108,92 @@ class NetworkSnapshotTest {
     }
 
     @Test
-    void reusesTheGridIndexWhenOnlyStatusesChange() {
-        NetworkSnapshot open = network(openStore("DXB-A", CUSTOMER, 1_000), openStore("DXB-B", CUSTOMER, 2_000));
+    void appliesACommittedChangeWithoutReindexing() {
+        Store marina = openStore("DXB-MARINA", CUSTOMER, 1_000);
+        NetworkSnapshot open = network(marina, openStore("DXB-JLT", CUSTOMER, 2_000));
         int coveringsAfterFirstBuild = grid.coverings;
 
-        NetworkSnapshot paused = open.withStores(
-                List.of(store("DXB-A", CUSTOMER, 1_000, StoreStatus.PAUSED), openStore("DXB-B", CUSTOMER, 2_000)));
+        NetworkSnapshot paused = open.with(changed(marina, StoreStatus.PAUSED));
 
         assertThat(grid.coverings).isEqualTo(coveringsAfterFirstBuild);
-        assertThat(ids(paused.storesServing(CUSTOMER, TRAVEL))).containsExactly("DXB-B");
+        assertThat(ids(paused.storesServing(CUSTOMER, TRAVEL))).containsExactly("DXB-JLT");
         assertThat(ids(open.storesServing(CUSTOMER, TRAVEL)))
                 .as("a snapshot never changes once built")
-                .containsExactly("DXB-A", "DXB-B");
+                .containsExactly("DXB-JLT", "DXB-MARINA");
     }
 
     @Test
-    void rebuildsTheGridIndexWhenAStoreMovesChangesItsRadiusOrJoins() {
+    void neverMovesAStoreBackToAnOlderVersion() {
+        Store open = openStore("DXB-MARINA", CUSTOMER, 1_000);
+        Store paused = changed(open, StoreStatus.PAUSED);
+        Store closed = changed(paused, StoreStatus.CLOSED);
+        NetworkSnapshot network = network(open).with(closed);
+
+        // The callback for the pause arrives after the one for the closure.
+        NetworkSnapshot late = network.with(paused);
+
+        assertThat(late).isSameAs(network);
+        assertThat(late.store(open.id())).contains(closed);
+        assertThat(network.with(closed)).as("the same version twice").isSameAs(network);
+    }
+
+    @Test
+    void addsAStoreItDidNotKnowYet() {
+        NetworkSnapshot network = network(openStore("DXB-JLT", JLT, 1_000));
+
+        NetworkSnapshot withMarina = network.with(openStore("DXB-MARINA", CUSTOMER, 1_000));
+
+        assertThat(ids(withMarina.storesServing(CUSTOMER, TRAVEL))).containsExactly("DXB-MARINA");
+    }
+
+    @Test
+    void aReloadThatReadTheDatabaseBeforeAChangeDoesNotUndoIt() {
+        Store open = openStore("DXB-MARINA", CUSTOMER, 1_000);
+        List<Store> readBeforeThePause = List.of(open);
+        NetworkSnapshot paused = network(open).with(changed(open, StoreStatus.PAUSED));
+
+        NetworkSnapshot reconciled = paused.reconciledWith(readBeforeThePause);
+
+        assertThat(reconciled.store(open.id()))
+                .hasValueSatisfying(store -> assertThat(store.status()).isEqualTo(StoreStatus.PAUSED));
+    }
+
+    @Test
+    void aReloadTakesWhatTheDatabaseHoldsWhenItIsNewer() {
+        Store open = openStore("DXB-MARINA", CUSTOMER, 1_000);
+        Store pausedElsewhere = changed(open, StoreStatus.PAUSED);
+
+        NetworkSnapshot reconciled = network(open).reconciledWith(List.of(pausedElsewhere));
+
+        assertThat(reconciled.store(open.id())).contains(pausedElsewhere);
+    }
+
+    @Test
+    void aReloadDropsStoresTheDatabaseNoLongerListsAndAddsNewOnes() {
+        NetworkSnapshot network = network(openStore("DXB-OLD", CUSTOMER, 1_000));
+
+        NetworkSnapshot reconciled = network.reconciledWith(List.of(openStore("DXB-NEW", CUSTOMER, 1_000)));
+
+        assertThat(reconciled.stores()).extracting(store -> store.id().value()).containsExactly("DXB-NEW");
+    }
+
+    @Test
+    void reindexesOnlyWhenAStoreMovesChangesItsRadiusOrJoins() {
         NetworkSnapshot network = network(openStore("DXB-A", CUSTOMER, 1_000));
 
         int before = grid.coverings;
-        network = network.withStores(List.of(openStore("DXB-A", offset(CUSTOMER, 0, 10), 1_000)));
+        network = network.reconciledWith(List.of(store("DXB-A", CUSTOMER, 1_000, StoreStatus.BUSY)));
+        assertThat(grid.coverings).as("status only").isEqualTo(before);
+
+        network = network.reconciledWith(List.of(openStore("DXB-A", offset(CUSTOMER, 0, 10), 1_000)));
         assertThat(grid.coverings).as("moved").isEqualTo(before + 1);
 
         before = grid.coverings;
-        network = network.withStores(List.of(openStore("DXB-A", offset(CUSTOMER, 0, 10), 1_500)));
+        network = network.reconciledWith(List.of(openStore("DXB-A", offset(CUSTOMER, 0, 10), 1_500)));
         assertThat(grid.coverings).as("new radius").isEqualTo(before + 1);
 
         before = grid.coverings;
-        network.withStores(
+        network.reconciledWith(
                 List.of(openStore("DXB-A", offset(CUSTOMER, 0, 10), 1_500), openStore("DXB-B", CUSTOMER, 1_000)));
         assertThat(grid.coverings).as("new store").isEqualTo(before + 2);
     }
@@ -146,7 +205,7 @@ class NetworkSnapshotTest {
     }
 
     private NetworkSnapshot network(Store... stores) {
-        return NetworkSnapshot.empty(grid).withStores(List.of(stores));
+        return NetworkSnapshot.empty(grid).reconciledWith(List.of(stores));
     }
 
     private static List<String> ids(List<StoreReach> serving) {

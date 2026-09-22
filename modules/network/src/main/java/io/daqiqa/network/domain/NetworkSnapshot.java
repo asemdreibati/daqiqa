@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
 
 /**
  * An immutable snapshot of the store network, indexed to answer "which stores can serve this point?" from memory.
@@ -23,8 +24,12 @@ import java.util.stream.Collectors;
  *
  * <p><b>Why snapshots.</b> Coverage is read on every promise but changes a few times a day. Readers therefore never
  * lock: they hold on to one snapshot, which never changes, while a writer builds the next one and publishes it
- * atomically. The index covers every store whatever its status, so {@link #withStores} reuses it when only statuses
- * (or names, or picker counts) changed: pausing a store costs O(stores), not a re-indexing.
+ * atomically. The index covers every store whatever its status, so a new snapshot reuses it when only statuses (or
+ * names, or picker counts) changed: pausing a store costs O(stores), not a re-indexing.
+ *
+ * <p><b>Versions.</b> Changes can reach a snapshot out of order (after-commit callbacks of concurrent transactions, a
+ * reload that read the database just before a commit). Every store carries the version of the row it came from, and a
+ * snapshot only ever replaces a store with a newer version of it, so it can never move a store back to an older state.
  */
 public final class NetworkSnapshot {
 
@@ -66,16 +71,39 @@ public final class NetworkSnapshot {
     }
 
     /**
-     * A snapshot of the network made of exactly {@code stores}. Reuses this snapshot's grid index when no store
-     * appeared, disappeared, moved or changed its service radius.
+     * The network as the database lists it: stores it no longer lists are dropped, new ones are added, and for every
+     * other store the newer version wins. A reload that read the database just before a change was committed (and
+     * already {@linkplain #with applied}) therefore cannot undo that change.
      *
      * @throws IllegalStateException if two stores have the same id
      */
-    public NetworkSnapshot withStores(Collection<Store> stores) {
-        List<Store> sorted = stores.stream().sorted(BY_ID).toList();
-        List<Footprint> newFootprints = sorted.stream().map(Footprint::of).toList();
-        Map<Long, int[]> index = newFootprints.equals(footprints) ? storesByCell : index(newFootprints, grid);
-        return new NetworkSnapshot(grid, sorted, newFootprints, index);
+    public NetworkSnapshot reconciledWith(Collection<Store> committed) {
+        List<Store> reconciled = committed.stream()
+                .map(store -> {
+                    @Nullable Store known = storesById.get(store.id());
+                    return known != null && known.version() > store.version() ? known : store;
+                })
+                .toList();
+        return rebuiltWith(reconciled);
+    }
+
+    /**
+     * This network with {@code changed} as committed, or this very snapshot when it already holds that version of the
+     * store or a newer one.
+     */
+    public NetworkSnapshot with(Store changed) {
+        @Nullable Store known = storesById.get(changed.id());
+        if (known != null && known.version() >= changed.version()) {
+            return this;
+        }
+        List<Store> updated = new ArrayList<>(stores.size() + 1);
+        for (Store store : stores) {
+            if (!store.id().equals(changed.id())) {
+                updated.add(store);
+            }
+        }
+        updated.add(changed);
+        return rebuiltWith(updated);
     }
 
     /** Every store, whatever its status, ordered by id. */
@@ -108,6 +136,14 @@ public final class NetworkSnapshot {
         }
         serving.sort(FASTEST_FIRST);
         return Collections.unmodifiableList(serving);
+    }
+
+    /** A snapshot of exactly {@code stores}, reusing this snapshot's grid index when no footprint changed. */
+    private NetworkSnapshot rebuiltWith(Collection<Store> stores) {
+        List<Store> sorted = stores.stream().sorted(BY_ID).toList();
+        List<Footprint> newFootprints = sorted.stream().map(Footprint::of).toList();
+        Map<Long, int[]> index = newFootprints.equals(footprints) ? storesByCell : index(newFootprints, grid);
+        return new NetworkSnapshot(grid, sorted, newFootprints, index);
     }
 
     private static Map<Long, int[]> index(List<Footprint> footprints, CellGrid grid) {

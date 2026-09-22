@@ -39,7 +39,21 @@ class StoreTest {
                         DUBAI_MARINA,
                         StoreStatus.OPEN,
                         -1,
-                        3_000));
+                        3_000,
+                        1));
+    }
+
+    @Test
+    void rejectsANegativeVersion() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new Store(
+                        StoreId.of("DXB-MARINA"),
+                        LocalizedText.of("Marina", "المارينا"),
+                        DUBAI_MARINA,
+                        StoreStatus.OPEN,
+                        6,
+                        3_000,
+                        -1));
     }
 
     @ParameterizedTest

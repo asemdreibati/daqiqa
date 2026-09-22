@@ -81,15 +81,32 @@ class CoverageIndexTest {
     }
 
     @Test
-    void aStatusChangeIsVisibleToTheVeryNextLookup() {
+    void aCommittedStatusChangeIsVisibleToTheVeryNextLookupWithoutReadingTheDatabase() {
         network(openStore("DXB-MARINA", DUBAI_MARINA, 3_000));
         StoreId marina = StoreId.of("DXB-MARINA");
+        int reloads = repository.reloads();
 
-        repository.updateStatus(marina, StoreStatus.PAUSED, NOW);
-        view.onStoreStatusChanged(new StoreStatusChanged(marina, StoreStatus.PAUSED));
+        Store paused = repository.updateStatus(marina, StoreStatus.PAUSED, NOW).orElseThrow();
+        view.onStoreStatusChanged(new StoreStatusChanged(paused));
 
         assertThat(view.storesServing(DUBAI_MARINA)).isEmpty();
         assertThat(view.find(marina)).map(DarkStore::status).contains(StoreStatus.PAUSED);
+        assertThat(repository.reloads())
+                .as("the committed row is applied as is")
+                .isEqualTo(reloads);
+    }
+
+    @Test
+    void aChangeThatArrivesLateNeverMovesAStoreBack() {
+        network(openStore("DXB-MARINA", DUBAI_MARINA, 3_000));
+        StoreId marina = StoreId.of("DXB-MARINA");
+        Store paused = repository.updateStatus(marina, StoreStatus.PAUSED, NOW).orElseThrow();
+        Store reopened = repository.updateStatus(marina, StoreStatus.OPEN, NOW).orElseThrow();
+
+        view.onStoreStatusChanged(new StoreStatusChanged(reopened));
+        view.onStoreStatusChanged(new StoreStatusChanged(paused));
+
+        assertThat(view.find(marina)).map(DarkStore::status).contains(StoreStatus.OPEN);
     }
 
     @Test

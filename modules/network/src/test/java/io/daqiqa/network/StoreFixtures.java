@@ -25,7 +25,20 @@ public final class StoreFixtures {
                 location,
                 status,
                 6,
-                serviceRadiusMeters);
+                serviceRadiusMeters,
+                1);
+    }
+
+    /** {@code store} after a committed status change: same store, new status, next version. */
+    public static Store changed(Store store, StoreStatus status) {
+        return new Store(
+                store.id(),
+                store.name(),
+                store.location(),
+                status,
+                store.activePickers(),
+                store.serviceRadiusMeters(),
+                store.version() + 1);
     }
 
     public static Store openStore(String id, GeoPoint location, int serviceRadiusMeters) {

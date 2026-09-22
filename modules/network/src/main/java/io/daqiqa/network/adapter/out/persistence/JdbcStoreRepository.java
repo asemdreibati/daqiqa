@@ -20,7 +20,7 @@ import org.springframework.stereotype.Repository;
 class JdbcStoreRepository implements StoreRepository {
 
     private static final String COLUMNS =
-            "id, name_en, name_ar, latitude, longitude, status, active_pickers, service_radius_m";
+            "id, name_en, name_ar, latitude, longitude, status, active_pickers, service_radius_m, version";
 
     private final JdbcClient jdbc;
 
@@ -46,9 +46,11 @@ class JdbcStoreRepository implements StoreRepository {
 
     @Override
     public Optional<Store> updateStatus(StoreId id, StoreStatus status, Instant changedAt) {
-        // One statement: the update and the read of the updated row cannot interleave with another change.
-        return jdbc.sql("UPDATE network.dark_store SET status = :status, updated_at = :changedAt WHERE id = :id"
-                        + " RETURNING " + COLUMNS)
+        // One statement returns the row as updated. The row lock orders concurrent updates of a store, so versions
+        // grow in commit order.
+        return jdbc.sql("UPDATE network.dark_store"
+                        + " SET status = :status, updated_at = :changedAt, version = version + 1"
+                        + " WHERE id = :id RETURNING " + COLUMNS)
                 .param("status", status.name())
                 .param("changedAt", OffsetDateTime.ofInstant(changedAt, ZoneOffset.UTC))
                 .param("id", id.value())
@@ -63,6 +65,7 @@ class JdbcStoreRepository implements StoreRepository {
                 GeoPoint.of(rs.getDouble("latitude"), rs.getDouble("longitude")),
                 StoreStatus.valueOf(rs.getString("status")),
                 rs.getInt("active_pickers"),
-                rs.getInt("service_radius_m"));
+                rs.getInt("service_radius_m"),
+                rs.getLong("version"));
     }
 }
