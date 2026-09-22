@@ -1,5 +1,6 @@
 package io.daqiqa.inventory.application;
 
+import static io.daqiqa.inventory.support.InventoryTables.ARRANGED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -47,8 +48,8 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
 
         Reserved reserved = assertReserved(result);
         assertThat(reserved.expiresAt()).isEqualTo(MutableClock.START.plus(HOLD));
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 2, 1));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 1, 1));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 2, clock.instant()));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 1, clock.instant()));
         assertThat(tables.reservation(reserved.reservationId()))
                 .isEqualTo(new ReservationRow(
                         reserved.reservationId().value(), "DXB-MARINA", "order-1", "HELD", null, reserved.expiresAt()));
@@ -63,8 +64,8 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
         ReservationResult result = reservations.reserve(basket("order-1", milk(2), bread(3), water(1)));
 
         assertThat(result).isEqualTo(new Rejected(List.of(new Shortage(BREAD, 3, 1), new Shortage(WATER, 1, 0))));
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, 0));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(1, 0, 0));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, ARRANGED_AT));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(1, 0, ARRANGED_AT));
         assertThat(tables.reservations()).isEmpty();
     }
 
@@ -88,7 +89,7 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
         assertThat(retry)
                 .as("same id, same expiry, although the stock is gone now")
                 .isEqualTo(first);
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(2, 2, 1));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(2, 2, MutableClock.START));
         assertThat(tables.reservations()).hasSize(1);
     }
 
@@ -179,7 +180,7 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
         });
 
         assertThat(tables.reservations()).isEmpty();
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, 0));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, ARRANGED_AT));
     }
 
     @Test
@@ -286,8 +287,8 @@ class InventoryReservationsTest extends InventoryIntegrationTest {
         assertThat(tables.reservation(reserved.reservationId()))
                 .extracting(ReservationRow::status, ReservationRow::releaseReason)
                 .containsExactly("RELEASED", "PAYMENT_FAILED");
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, 2));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 0, 2));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, clock.instant()));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 0, clock.instant()));
         assertThat(counter("daqiqa.inventory.releases", "reason", "payment_failed"))
                 .isEqualTo(paymentFailures + 1);
         assertThat(outbox.committedEvents())

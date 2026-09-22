@@ -1,5 +1,6 @@
 package io.daqiqa.inventory.application;
 
+import static io.daqiqa.inventory.support.InventoryTables.ARRANGED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -29,7 +30,7 @@ class StockServiceTest extends InventoryIntegrationTest {
         StockLevel level = stock.adjust(new AdjustStock(MARINA, MILK, 24, AdjustmentReason.RECEIVED));
 
         assertThat(level).isEqualTo(new StockLevel(MARINA, MILK, 24, 0));
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(24, 0, 1));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(24, 0, clock.instant()));
         List<AdjustmentRow> audit = tables.adjustments();
         assertThat(audit).hasSize(1);
         AdjustmentRow entry = audit.getFirst();
@@ -68,7 +69,7 @@ class StockServiceTest extends InventoryIntegrationTest {
         assertThatThrownBy(() -> stock.adjust(new AdjustStock(MARINA, MILK, -7, AdjustmentReason.CYCLE_COUNT)))
                 .isInstanceOf(StockBelowReservedException.class);
 
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 4, 0));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 4, ARRANGED_AT));
         assertThat(tables.adjustments()).isEmpty();
         assertThat(outbox.committedEvents()).isEmpty();
     }

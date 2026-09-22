@@ -73,7 +73,7 @@ class ReservationConcurrencyTest extends InventoryIntegrationTest {
                 .hasSize(150)
                 .allSatisfy(rejected ->
                         assertThat(((Rejected) rejected).shortages()).containsExactly(new Shortage(MILK, 1, 0)));
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(50, 50, 50));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(50, 50, clock.instant()));
         assertThat(tables.reservations())
                 .hasSize(50)
                 .extracting(ReservationRow::status)

@@ -30,17 +30,28 @@ class StockProblemHandler {
 
     @ExceptionHandler
     ProblemDetail storeNotFound(StoreNotFoundException e) {
-        return problem(HttpStatus.NOT_FOUND, "STORE_NOT_FOUND", "Store not found", e.getMessage());
+        ProblemDetail problem = problem(HttpStatus.NOT_FOUND, "STORE_NOT_FOUND", "Store not found", e.getMessage());
+        problem.setProperty("storeId", e.storeId().value());
+        return problem;
     }
 
     @ExceptionHandler
     ProblemDetail unknownSku(UnknownSkuException e) {
-        return problem(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_SKU", "Unknown SKU", e.getMessage());
+        ProblemDetail problem = problem(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_SKU", "Unknown SKU", e.getMessage());
+        problem.setProperty("sku", e.sku().value());
+        return problem;
     }
 
+    /** Carries the numbers, so a client can see how far the change can go without parsing the detail. */
     @ExceptionHandler
     ProblemDetail stockBelowReserved(StockBelowReservedException e) {
-        return problem(HttpStatus.CONFLICT, "STOCK_BELOW_RESERVED", "Stock below reserved", e.getMessage());
+        ProblemDetail problem =
+                problem(HttpStatus.CONFLICT, "STOCK_BELOW_RESERVED", "Stock below reserved", e.getMessage());
+        problem.setProperty("sku", e.level().sku().value());
+        problem.setProperty("onHand", e.level().onHand());
+        problem.setProperty("reserved", e.level().reserved());
+        problem.setProperty("delta", e.delta());
+        return problem;
     }
 
     @ExceptionHandler

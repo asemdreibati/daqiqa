@@ -1,5 +1,6 @@
 package io.daqiqa.inventory.adapter.out.persistence;
 
+import static io.daqiqa.inventory.support.InventoryTables.ARRANGED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -98,8 +99,8 @@ class JdbcStockLevelRepositoryTest extends PostgresRepositoryTest {
 
         repository.reserve(MARINA, List.of(new SkuQuantity(BREAD, 5), new SkuQuantity(MILK, 2)), NOW);
 
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 3, 1));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 5, 1));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 3, NOW));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 5, NOW));
     }
 
     @Test
@@ -111,8 +112,8 @@ class JdbcStockLevelRepositoryTest extends PostgresRepositoryTest {
                 .isThrownBy(() -> transaction.executeWithoutResult(status ->
                         repository.reserve(MARINA, List.of(new SkuQuantity(MILK, 2), new SkuQuantity(BREAD, 2)), NOW)))
                 .withMessageContaining("Could hold only 1 of 2 lines");
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, 0));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(1, 0, 0));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 0, ARRANGED_AT));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(1, 0, ARRANGED_AT));
     }
 
     @Test
@@ -125,9 +126,9 @@ class JdbcStockLevelRepositoryTest extends PostgresRepositoryTest {
                 List.of(new HeldUnits(JLT, MILK, 1), new HeldUnits(MARINA, BREAD, 5), new HeldUnits(MARINA, MILK, 2)),
                 NOW);
 
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 4, 1));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 0, 1));
-        assertThat(tables.stockOf(JLT, MILK)).isEqualTo(new StockRow(3, 2, 1));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 4, NOW));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(5, 0, NOW));
+        assertThat(tables.stockOf(JLT, MILK)).isEqualTo(new StockRow(3, 2, NOW));
     }
 
     @Test
@@ -139,7 +140,7 @@ class JdbcStockLevelRepositoryTest extends PostgresRepositoryTest {
                 .withMessageContaining("reserved stock is inconsistent");
         assertThatIllegalStateException()
                 .isThrownBy(() -> repository.release(List.of(new HeldUnits(MARINA, BREAD, 1)), NOW));
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 1, 0));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(10, 1, ARRANGED_AT));
     }
 
     @Test
@@ -150,7 +151,7 @@ class JdbcStockLevelRepositoryTest extends PostgresRepositoryTest {
         StockLevel existing = transaction.execute(status -> repository.lockOrCreate(MARINA, MILK, NOW));
 
         assertThat(created).isEqualTo(StockLevel.none(MARINA, BREAD));
-        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(0, 0, 0));
+        assertThat(tables.stockOf(MARINA, BREAD)).isEqualTo(new StockRow(0, 0, NOW));
         assertThat(existing).isEqualTo(new StockLevel(MARINA, MILK, 10, 4));
     }
 
@@ -160,7 +161,7 @@ class JdbcStockLevelRepositoryTest extends PostgresRepositoryTest {
 
         repository.adjustOnHand(MARINA, MILK, -6, NOW);
 
-        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(4, 4, 1));
+        assertThat(tables.stockOf(MARINA, MILK)).isEqualTo(new StockRow(4, 4, NOW));
         assertThatIllegalStateException().isThrownBy(() -> repository.adjustOnHand(MARINA, MILK, -1, NOW));
         assertThatIllegalStateException().isThrownBy(() -> repository.adjustOnHand(MARINA, BREAD, 5, NOW));
     }

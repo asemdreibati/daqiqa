@@ -11,7 +11,6 @@ CREATE TABLE inventory.stock_level (
     sku        text        COLLATE "C" NOT NULL,
     on_hand    integer     NOT NULL,
     reserved   integer     NOT NULL,
-    version    bigint      NOT NULL,
     updated_at timestamptz NOT NULL,
     CONSTRAINT stock_level_pk PRIMARY KEY (store_id, sku),
     CONSTRAINT stock_level_on_hand_non_negative CHECK (on_hand >= 0),

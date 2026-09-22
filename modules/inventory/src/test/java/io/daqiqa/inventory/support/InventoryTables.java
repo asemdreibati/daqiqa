@@ -8,6 +8,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -21,6 +22,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  * going through the code under test.
  */
 public final class InventoryTables {
+
+    /** When rows arranged by {@link #stock} were last written: a row still showing it was never written since. */
+    public static final Instant ARRANGED_AT = Instant.parse("2026-09-22T09:00:00Z");
 
     private final DataSource dataSource;
     private final JdbcClient jdbc;
@@ -36,13 +40,13 @@ public final class InventoryTables {
 
     public void stock(StoreId store, Sku sku, int onHand, int reserved) {
         jdbc.sql("""
-                        INSERT INTO inventory.stock_level (store_id, sku, on_hand, reserved, version, updated_at)
-                        VALUES (:store, :sku, :onHand, :reserved, 0, :at)""")
+                        INSERT INTO inventory.stock_level (store_id, sku, on_hand, reserved, updated_at)
+                        VALUES (:store, :sku, :onHand, :reserved, :at)""")
                 .param("store", store.value())
                 .param("sku", sku.value())
                 .param("onHand", onHand)
                 .param("reserved", reserved)
-                .param("at", OffsetDateTime.parse("2026-09-22T09:00:00Z"))
+                .param("at", ARRANGED_AT.atOffset(ZoneOffset.UTC))
                 .update();
     }
 
@@ -58,12 +62,15 @@ public final class InventoryTables {
     /** The stock row, or null when the store has no row for the SKU. */
     public @Nullable StockRow stockOf(StoreId store, Sku sku) {
         return jdbc.sql("""
-                        SELECT on_hand, reserved, version
+                        SELECT on_hand, reserved, updated_at
                           FROM inventory.stock_level
                          WHERE store_id = :store AND sku = :sku""")
                 .param("store", store.value())
                 .param("sku", sku.value())
-                .query((rs, row) -> new StockRow(rs.getInt("on_hand"), rs.getInt("reserved"), rs.getLong("version")))
+                .query((rs, row) -> new StockRow(
+                        rs.getInt("on_hand"),
+                        rs.getInt("reserved"),
+                        rs.getObject("updated_at", OffsetDateTime.class).toInstant()))
                 .optional()
                 .orElse(null);
     }
@@ -161,7 +168,8 @@ public final class InventoryTables {
                 .list();
     }
 
-    public record StockRow(int onHand, int reserved, long version) {}
+    /** A stock row as stored; {@code updatedAt} tells whether (and when) it was last written. */
+    public record StockRow(int onHand, int reserved, Instant updatedAt) {}
 
     public record ReservationRow(
             UUID id,

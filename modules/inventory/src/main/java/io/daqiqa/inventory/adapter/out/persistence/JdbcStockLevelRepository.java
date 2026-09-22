@@ -88,7 +88,7 @@ class JdbcStockLevelRepository implements StockLevelRepository {
         // even a caller that skipped the lock could not oversell: a line it refuses leaves the count short.
         int updated = jdbc.sql("""
                         UPDATE inventory.stock_level AS s
-                           SET reserved = s.reserved + l.quantity, version = s.version + 1, updated_at = :now
+                           SET reserved = s.reserved + l.quantity, updated_at = :now
                           FROM unnest(:skus, :quantities) AS l(sku, quantity)
                          WHERE s.store_id = :storeId
                            AND s.sku = l.sku
@@ -121,7 +121,7 @@ class JdbcStockLevelRepository implements StockLevelRepository {
         int locked = lock(units.stream().map(HeldUnits::key).toList());
         int updated = jdbc.sql("""
                         UPDATE inventory.stock_level AS s
-                           SET reserved = s.reserved - u.quantity, version = s.version + 1, updated_at = :now
+                           SET reserved = s.reserved - u.quantity, updated_at = :now
                           FROM unnest(:storeIds, :skus, :quantities) AS u(store_id, sku, quantity)
                          WHERE s.store_id = u.store_id
                            AND s.sku = u.sku
@@ -169,8 +169,8 @@ class JdbcStockLevelRepository implements StockLevelRepository {
         // Create the row first (nothing happens if it exists), so there is always a row to lock: two first deliveries
         // of a SKU then queue on the same row instead of racing to insert it.
         jdbc.sql("""
-                        INSERT INTO inventory.stock_level (store_id, sku, on_hand, reserved, version, updated_at)
-                        VALUES (:storeId, :sku, 0, 0, 0, :now)
+                        INSERT INTO inventory.stock_level (store_id, sku, on_hand, reserved, updated_at)
+                        VALUES (:storeId, :sku, 0, 0, :now)
                         ON CONFLICT (store_id, sku) DO NOTHING""")
                 .param("storeId", storeId.value())
                 .param("sku", sku.value())
@@ -191,7 +191,7 @@ class JdbcStockLevelRepository implements StockLevelRepository {
     public void adjustOnHand(StoreId storeId, Sku sku, int delta, Instant now) {
         int updated = jdbc.sql("""
                         UPDATE inventory.stock_level
-                           SET on_hand = on_hand + :delta, version = version + 1, updated_at = :now
+                           SET on_hand = on_hand + :delta, updated_at = :now
                          WHERE store_id = :storeId AND sku = :sku AND on_hand + :delta >= reserved""")
                 .param("storeId", storeId.value())
                 .param("sku", sku.value())

@@ -118,6 +118,11 @@ class StockControllerTest {
     @Nested
     class AdjustingStock {
 
+        private static final String RECEIVED_FIVE = """
+                {"sku": "MILK-FULL-1L", "delta": 5, "reason": "RECEIVED"}""";
+        private static final String DAMAGED_SEVEN = """
+                {"sku": "MILK-FULL-1L", "delta": -7, "reason": "DAMAGED"}""";
+
         @Test
         void appliesTheAdjustmentAndReturnsTheNewLevel() {
             given(stock.adjust(any())).willReturn(new StockLevel(MARINA, MILK, 34, 4));
@@ -129,32 +134,37 @@ class StockControllerTest {
         }
 
         @Test
-        void refusingToGoBelowReservedIsAConflict() {
+        void refusingToGoBelowReservedIsAConflictThatCarriesTheNumbers() {
             StockBelowReservedException refused = catchThrowableOfType(
                     StockBelowReservedException.class, () -> new StockLevel(MARINA, MILK, 10, 4).adjust(-7));
             given(stock.adjust(any())).willThrow(refused);
 
-            assertProblem(post("""
-                                    {"sku": "MILK-FULL-1L", "delta": -7, "reason": "DAMAGED"}"""), HttpStatus.CONFLICT, "STOCK_BELOW_RESERVED")
-                    .extractingPath("$.detail")
-                    .asString()
-                    .contains("4 are reserved");
+            AbstractJsonContentAssert<?> problem =
+                    assertProblem(post(DAMAGED_SEVEN), HttpStatus.CONFLICT, "STOCK_BELOW_RESERVED");
+
+            problem.extractingPath("$.detail").asString().contains("4 are reserved");
+            problem.extractingPath("$.sku").isEqualTo("MILK-FULL-1L");
+            problem.extractingPath("$.onHand").isEqualTo(10);
+            problem.extractingPath("$.reserved").isEqualTo(4);
+            problem.extractingPath("$.delta").isEqualTo(-7);
         }
 
         @Test
         void aSkuTheCatalogDoesNotKnowIsUnprocessable() {
             given(stock.adjust(any())).willThrow(new UnknownSkuException(MILK));
 
-            assertProblem(post("""
-                            {"sku": "MILK-FULL-1L", "delta": 5, "reason": "RECEIVED"}"""), HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_SKU");
+            assertProblem(post(RECEIVED_FIVE), HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_SKU")
+                    .extractingPath("$.sku")
+                    .isEqualTo("MILK-FULL-1L");
         }
 
         @Test
         void anUnknownStoreIsNotFound() {
             given(stock.adjust(any())).willThrow(new StoreNotFoundException(MARINA));
 
-            assertProblem(post("""
-                            {"sku": "MILK-FULL-1L", "delta": 5, "reason": "RECEIVED"}"""), HttpStatus.NOT_FOUND, "STORE_NOT_FOUND");
+            assertProblem(post(RECEIVED_FIVE), HttpStatus.NOT_FOUND, "STORE_NOT_FOUND")
+                    .extractingPath("$.storeId")
+                    .isEqualTo("DXB-MARINA");
         }
 
         @Test
