@@ -1,6 +1,7 @@
 package io.daqiqa.inventory.domain;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 import io.daqiqa.kernel.ReservationId;
 import io.daqiqa.kernel.Sku;
@@ -28,6 +29,11 @@ class HeldUnitsTest {
         assertThat(HeldUnits.heldBy(reservations))
                 .containsExactly(
                         new HeldUnits(JLT, MILK, 4), new HeldUnits(MARINA, BREAD, 1), new HeldUnits(MARINA, MILK, 5));
+    }
+
+    @Test
+    void holdsAtLeastOneUnit() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new HeldUnits(MARINA, MILK, 0));
     }
 
     private static Reservation hold(StoreId store, SkuQuantity... lines) {

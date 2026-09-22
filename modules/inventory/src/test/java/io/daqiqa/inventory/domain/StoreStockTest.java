@@ -44,6 +44,12 @@ class StoreStockTest {
     }
 
     @Test
+    void aShortfallMeansLessIsAvailableThanRequested() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new Shortfall(MILK, 2, 2));
+        assertThatIllegalArgumentException().isThrownBy(() -> new Shortfall(MILK, 2, -1));
+    }
+
+    @Test
     void holdsOnlyTheStockOfItsOwnStoreOnceEach() {
         StoreId jlt = StoreId.of("DXB-JLT");
 
