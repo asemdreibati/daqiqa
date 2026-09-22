@@ -32,6 +32,7 @@ public record MessagingProperties(
         requirePositive(retention, "daqiqa.messaging.retention");
     }
 
+    /** Where the relay publishes events. */
     public enum Publisher {
         LOGGING,
         KAFKA
