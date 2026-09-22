@@ -144,7 +144,12 @@ class PromiseTokenCodecTest {
                 // the seven fields of an earlier draft, without the location
                 "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|1790078400|1790078490|hash",
                 // a latitude off the globe
-                "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|1790078400|1790078490|hash|95000000|0"
+                "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|1790078400|1790078490|hash|95000000|0",
+                // times no clock can show (beyond Instant's range)
+                "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|9223372036854775000"
+                        + "|9223372036854775090|hash|25077200|55139000",
+                "0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11|DXB-MARINA|EXPRESS_15|11|-9223372036854775000"
+                        + "|-9223372036854774910|hash|25077200|55139000"
             })
     void aCorrectlySignedPayloadThatIsNotAPromiseIsMalformed(String payload) throws Exception {
         assertRejected(Tokens.sign("k1", key(1), payload)).isEqualTo(Reason.MALFORMED);

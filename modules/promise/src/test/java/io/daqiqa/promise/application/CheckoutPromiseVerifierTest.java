@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 import io.daqiqa.kernel.GeoPoint;
+import io.daqiqa.kernel.PromiseId;
 import io.daqiqa.kernel.SkuQuantity;
 import io.daqiqa.kernel.StoreId;
 import io.daqiqa.network.api.StoreStatus;
@@ -21,7 +22,9 @@ import io.daqiqa.promise.api.InvalidPromiseException;
 import io.daqiqa.promise.api.InvalidPromiseException.Reason;
 import io.daqiqa.promise.api.VerifiedPromise;
 import io.daqiqa.promise.domain.Basket;
+import java.security.GeneralSecurityException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.assertj.core.api.AbstractObjectAssert;
@@ -68,6 +71,40 @@ class CheckoutPromiseVerifierTest {
 
         clock.advance(Duration.ofHours(1));
         assertRejected(token, BREAKFAST, CUSTOMER).isEqualTo(Reason.EXPIRED);
+    }
+
+    /** The review's forgery, signed with a key the verifier trusts: a one-minute ETA, valid for a day. */
+    @Test
+    void aCorrectlySignedTokenValidForLongerThanWeIssueTokensForIsNotOurs() {
+        assertRejected(forge(ISSUED_AT, ISSUED_AT.plus(Duration.ofDays(1))), BREAKFAST, CUSTOMER)
+                .isEqualTo(Reason.MALFORMED);
+        assertRejected(forge(ISSUED_AT, ISSUED_AT.plusSeconds(91)), BREAKFAST, CUSTOMER)
+                .as("one second longer than the validity")
+                .isEqualTo(Reason.MALFORMED);
+        assertThat(verifier.verify(forge(ISSUED_AT, ISSUED_AT.plusSeconds(90)), BREAKFAST, CUSTOMER)
+                        .etaMinutes())
+                .as("exactly the validity, as we issue them")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void aTokenThatExpiresNoLaterThanItIsIssuedIsNotOurs() {
+        assertRejected(forge(ISSUED_AT, ISSUED_AT), BREAKFAST, CUSTOMER).isEqualTo(Reason.MALFORMED);
+        // Not yet expired on our clock, which alone would have let it through.
+        assertRejected(forge(ISSUED_AT.plusSeconds(20), ISSUED_AT.plusSeconds(10)), BREAKFAST, CUSTOMER)
+                .isEqualTo(Reason.MALFORMED);
+    }
+
+    @Test
+    void aTokenIssuedMoreThanThirtySecondsAheadOfOurClockIsNotOurs() {
+        clock.set(ISSUED_AT);
+        Instant latest = ISSUED_AT.plus(CheckoutPromiseVerifier.MAX_CLOCK_SKEW);
+
+        assertThat(verifier.verify(forge(latest, latest.plusSeconds(90)), BREAKFAST, CUSTOMER))
+                .as("the issuing instance's clock may run up to 30 s ahead of ours")
+                .isNotNull();
+        assertRejected(forge(latest.plusSeconds(1), latest.plusSeconds(91)), BREAKFAST, CUSTOMER)
+                .isEqualTo(Reason.MALFORMED);
     }
 
     @Test
@@ -166,6 +203,10 @@ class CheckoutPromiseVerifierTest {
         assertRejected(token + "x", otherBasket, elsewhere)
                 .as("signature first")
                 .isEqualTo(Reason.TAMPERED);
+        clock.set(ISSUED_AT.plus(Duration.ofDays(2)));
+        assertRejected(forge(ISSUED_AT, ISSUED_AT.plus(Duration.ofDays(1))), otherBasket, elsewhere)
+                .as("claims we never issue before expiry")
+                .isEqualTo(Reason.MALFORMED);
     }
 
     @ParameterizedTest
@@ -179,6 +220,28 @@ class CheckoutPromiseVerifierTest {
         return assertThatExceptionOfType(InvalidPromiseException.class)
                 .isThrownBy(() -> verifier.verify(token, lines, location))
                 .extracting(InvalidPromiseException::reason);
+    }
+
+    /**
+     * A correctly signed token, as anyone holding the key could sign it: one minute from Marina for {@code BREAKFAST}
+     * at {@code CUSTOMER}, with the given times.
+     */
+    private static String forge(Instant issuedAt, Instant expiresAt) {
+        TokenClaims claims = new TokenClaims(
+                PromiseId.newId(),
+                MARINA,
+                DeliveryTier.EXPRESS_15,
+                1,
+                issuedAt.getEpochSecond(),
+                expiresAt.getEpochSecond(),
+                BasketHash.of(BREAKFAST),
+                TokenClaims.toMicroDegrees(CUSTOMER.latitude()),
+                TokenClaims.toMicroDegrees(CUSTOMER.longitude()));
+        try {
+            return Tokens.sign("k1", key(1), claims.encode());
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** {@code meters} due north (south when negative): along a meridian the great-circle distance is exact. */

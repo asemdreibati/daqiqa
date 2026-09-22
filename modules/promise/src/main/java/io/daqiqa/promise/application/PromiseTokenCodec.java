@@ -81,6 +81,11 @@ public final class PromiseTokenCodec {
         return new IssuedPromise(claims.promiseId(), quote, claims.expiresAt(), token);
     }
 
+    /** How long the tokens this codec issues are valid: no token we issued is valid for longer. */
+    Duration validity() {
+        return validity;
+    }
+
     /**
      * What an authentic token asserts. Checks the format and key id ({@code MALFORMED}), then the signature
      * ({@code TAMPERED}); nothing is decoded or interpreted before the signature has been checked.

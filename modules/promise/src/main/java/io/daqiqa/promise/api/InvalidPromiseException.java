@@ -4,7 +4,10 @@ package io.daqiqa.promise.api;
 public final class InvalidPromiseException extends RuntimeException {
 
     public enum Reason {
-        /** Not a token we issued (bad format or unknown key). */
+        /**
+         * Not a token we issued: bad format, unknown key, or claims we never sign (valid for longer than we issue
+         * tokens for, or issued in the future).
+         */
         MALFORMED,
         /** Signature does not match: the token was altered. */
         TAMPERED,
