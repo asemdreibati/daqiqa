@@ -10,10 +10,10 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -46,7 +46,9 @@ public final class PostgresTestDatabase {
     private final String username;
     private final String password;
     private final HikariDataSource dataSource;
-    private final Set<String> migratedLocations = ConcurrentHashMap.newKeySet();
+
+    /** Every location migrated so far in this JVM; guarded by {@code this}. */
+    private final Set<String> migratedLocations = new LinkedHashSet<>();
 
     private PostgresTestDatabase(String jdbcUrl, String username, String password) {
         this.jdbcUrl = jdbcUrl;
@@ -154,21 +156,25 @@ public final class PostgresTestDatabase {
     }
 
     /**
-     * Runs Flyway migrations from the given locations, for example {@code "classpath:db/migration/inventory"}. Each
-     * location is migrated once per JVM; calling again is a no-op.
+     * Runs Flyway migrations from the given locations, for example {@code "classpath:db/migration/inventory"}.
+     * Calling again with locations already migrated is a no-op.
+     *
+     * <p>Flyway is always given <em>every</em> location migrated so far in this JVM, not only the new ones. Its
+     * validation fails on an applied migration it cannot resolve ("applied migration not resolved locally"), so
+     * migrating only the new locations broke whenever a test class asked for other schemas than a class that ran
+     * before it: the outcome depended on the order in which the classes ran.
      */
     public synchronized PostgresTestDatabase migrate(String... locations) {
-        List<String> pending = Arrays.stream(locations)
-                .filter(location -> !migratedLocations.contains(location))
-                .toList();
-        if (!pending.isEmpty()) {
+        Set<String> union = new LinkedHashSet<>(migratedLocations);
+        union.addAll(Arrays.asList(locations));
+        if (union.size() > migratedLocations.size()) {
             Flyway.configure()
                     .dataSource(dataSource)
-                    .locations(pending.toArray(String[]::new))
+                    .locations(union.toArray(String[]::new))
                     .outOfOrder(true) // modules own disjoint version ranges; see docs/engineering/conventions.md
                     .load()
                     .migrate();
-            migratedLocations.addAll(pending);
+            migratedLocations.addAll(union); // only once Flyway succeeded: a failed migration is retried next call
         }
         return this;
     }
