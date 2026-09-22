@@ -22,7 +22,8 @@ spring:
     out-of-order: true # modules own disjoint major versions; see docs/engineering/conventions.md
   mvc:
     problemdetails:
-      enabled: true # RFC 9457 responses for framework errors too
+      # RFC 9457 for framework errors too. GlobalProblemHandler replaces Boot's handler and adds the house format.
+      enabled: true
   kafka:
     bootstrap-servers: ${DAQIQA_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
