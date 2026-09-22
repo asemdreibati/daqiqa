@@ -30,6 +30,15 @@ dependencies {
     testImplementation(libs.archunit)
 }
 
+// Swagger UI shows the contract we hand-write (springdoc.swagger-ui.url), not the document springdoc derives from
+// the code, so the served copy must be the repository's file.
+tasks.named<ProcessResources>("processResources") {
+    from(layout.settingsDirectory.dir("api/openapi")) {
+        include("*.yaml")
+        into("static/openapi")
+    }
+}
+
 // bootRun is for local development: the dev profile brings the published development signing key and the Dubai demo
 // data. A system property rather than an argument, so that `bootRun --args=...` keeps it and can still override it.
 tasks.named<BootRun>("bootRun") {

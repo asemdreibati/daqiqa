@@ -120,8 +120,9 @@ docker compose -f deploy/compose/compose.yaml up -d    # PostgreSQL 17 and Kafka
 ./gradlew :apps:daqiqa-server:bootRun                  # migrations, Dubai demo stores and stock, port 8080
 ```
 
-Then open <http://localhost:8080/swagger-ui.html>. Also useful: `/actuator/health`, `/actuator/prometheus` and
-`/v3/api-docs`.
+Then open <http://localhost:8080/swagger-ui.html>, which serves the hand-written contract
+([`api/openapi/daqiqa-v1.yaml`](api/openapi/daqiqa-v1.yaml), copied into the jar at build time). Also useful:
+`/actuator/health`, `/actuator/prometheus` and `/v3/api-docs` (the document springdoc derives from the code).
 
 `bootRun` runs the **`dev` profile** (`application-dev.yaml`): the Dubai demo data and a signing key published in this
 repository. Every other way of starting the server brings its own keys and no demo data — and the server refuses to

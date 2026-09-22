@@ -68,6 +68,9 @@ management:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+    # The hand-written contract (api/openapi, copied into the jar by processResources), not the document springdoc
+    # derives from the code; that one stays at /v3/api-docs.
+    url: /openapi/daqiqa-v1.yaml
 
 logging:
   structured:
