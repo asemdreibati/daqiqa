@@ -124,17 +124,19 @@ first.)
 
 ## Implementation notes (wave 1)
 
-> Built on branch `wave1/inventory`. The specification above is unchanged; where the code differs, this section says
-> so and why. One correction to the specification is flagged below (expiry batches).
+> Built on branch `wave1/inventory` and revised after a staff-level review. The specification above is unchanged.
+> Where the code differs from it, this section says so and why. One correction to the specification is flagged below
+> (expiry batches).
 
 ### What was built
 
 | Layer | Package (`io.daqiqa.inventory.*`) | Main types |
 |---|---|---|
-| Domain (plain Java) | `domain` | `StockLevel` (`0 ≤ reserved ≤ onHand`, `adjust`), `StoreStock` (a basket's shortfalls), `Reservation` + `ReservationStatus` (immutable state machine returning `ConfirmOutcome` / `ReleaseOutcome`), `HeldUnits`, `StockAdjustment`, `AdjustmentReason`; ports `StockLevelRepository`, `ReservationRepository`, `StockAdjustmentLog` |
-| Application | `application` | `ReservationService` (implements `InventoryReservations`), `ReservationExpirySweeper`, `AvailabilityService` (implements `AvailabilityQuery`), `StockService` (levels and adjustments), `InventoryMetrics` |
-| Persistence | `adapter.out.persistence` | `JdbcStockLevelRepository`, `JdbcReservationRepository`, `JdbcStockAdjustmentLog` (`JdbcClient`, arrays bound with `ANY` / `unnest`) |
-| HTTP | `adapter.in.web` | `StockController`, `StockProblemHandler`, `StockMessages` (DTOs), `@NonZero` |
+| API (the contract) | `api` | `InventoryReservations` (now documents the rules callers follow), `AvailabilityQuery`, results |
+| Domain (plain Java) | `domain` | `StockLevel` (`0 ≤ reserved ≤ onHand`, `adjust`), `StoreStock` (a basket's shortfalls), `Reservation` + `ReservationStatus` + `EndReason` (immutable state machine whose changes are `Transition`s, returned inside `ConfirmOutcome` / `ReleaseOutcome`), `StockKey`, `HeldUnits`, `StockAdjustment`; ports `StockLevelRepository`, `ReservationRepository`, `StockAdjustmentLog` |
+| Application | `application` | `ReservationService` (implements `InventoryReservations`), `ReservationExpirySweeper`, `AvailabilityService` (implements `AvailabilityQuery`), `StockService`, `InventoryMetrics`, `ExpiryBacklogMetrics` |
+| Persistence | `adapter.out.persistence` | `JdbcStockLevelRepository`, `JdbcReservationRepository`, `JdbcStockAdjustmentLog` (`JdbcClient`; arrays bound with `ANY` / `unnest`) |
+| HTTP | `adapter.in.web` | `StockController`, `StockProblemHandler`, `StockMessages` (DTOs), `Identifiers`, `@NonZero` |
 | Wiring | `config` | `InventoryProperties`, `InventoryConfiguration` (sweeper bean and its schedule) |
 | Schema | `db/migration/inventory/V3_1__inventory_schema.sql` | `stock_level`, `reservation`, `reservation_line`, `stock_adjustment` |
 
@@ -147,16 +149,30 @@ The domain decides; the database applies the decision with guarded statements an
 and its row count is asserted: a line it refuses throws and rolls the transaction back, so even a caller that skipped
 the lock could not oversell. (3) `CHECK (reserved <= on_hand)` refuses the write if both were wrong.
 
+**No stock is returned twice.** Every change of a reservation's status is a `Transition` (from, to). The repository
+applies it with `AND status = from_status` and asserts the row count. A release or expiry applied twice therefore
+fails the whole transaction instead of lowering `reserved` a second time; no CHECK constraint could catch that, and
+the next checkout would oversell.
+
 **No deadlocks.** One lock order for the module. Reserving locks only stock rows, sorted, before inserting its new
-reservation. Confirming, releasing and expiring lock the reservation row first and its stock rows second. Every
-statement that locks several stock rows sorts them by store, then SKU. `EXPLAIN` shows `LockRows` above the `Sort`,
-so rows are locked in sorted order. Returning stock locks first (`SELECT ... ORDER BY store_id, sku FOR UPDATE`) and
-updates second, because an `UPDATE ... FROM unnest(...)` locks rows in whatever order its plan visits them. Store ids
-and SKUs are `COLLATE "C"`: the sort is byte order on every server, and an operating-system collation upgrade cannot
-reorder (and so corrupt) the indexes.
+reservation. Confirming, releasing, expiring and replaying a run-out hold lock the reservation row first and its
+stock rows second. Every statement that locks several stock rows sorts them by store, then SKU. `EXPLAIN` shows
+`LockRows` above the `Sort`, so rows are locked in sorted order. Returning stock locks first
+(`SELECT ... ORDER BY store_id, sku FOR UPDATE`) and updates second, because an `UPDATE ... FROM unnest(...)` locks
+rows in whatever order its plan visits them. Store ids and SKUs are `COLLATE "C"`: the sort is byte order on every
+server, and an operating-system collation upgrade cannot reorder (and so corrupt) the indexes.
+
+**Hot rows are locked briefly.** Ending reservations (a sweep batch, a late confirm, a release) runs in this order:
+
+1. the guarded status update, on reservation rows the transaction already holds;
+2. the events, appended to the outbox, an append-only table nobody else waits on;
+3. the stock release, last.
+
+The stock rows every checkout needs therefore stay locked only for the final statements before commit.
 
 **All or nothing, and nothing written on `Rejected`.** A rejection only took row locks, which end with the
-transaction. The multi-line increment is one statement with an asserted row count.
+transaction. The multi-line increment is one statement with an asserted row count. There is one exception: a retry
+whose reference's hold had run out also commits that hold's expiry, which the sweeper would have done anyway.
 
 **Idempotent by reference, including two simultaneous first calls.** Step 1 (the fast path) returns an active
 reservation before taking any lock. Two first calls can both miss it. Each case is handled:
@@ -173,25 +189,57 @@ Why `ON CONFLICT` rather than catching the unique violation: in PostgreSQL an er
 `reserve` runs in the caller's transaction. If the winning reservation has already ended by the time it is read back
 (a caller bug on top of a race), the call fails with `IllegalStateException` so the caller retries.
 
+**A replay never reports a hold whose time has run out.** If the fast path finds a hold whose time ran out but which
+the sweeper has not reached yet, the retry does the following:
+
+1. locks the hold's reservation row;
+2. locks the hold's stock rows and the new basket's rows together, in one sorted statement, across stores if
+   necessary (locking them in two steps could deadlock with a concurrent basket);
+3. expires the hold: `ReservationExpiredV1` is appended, and counted as `trigger=replay`;
+4. reserves the basket afresh, or rejects it if the stock is now short.
+
+A confirmed reservation is replayed however late.
+
 **Joins the caller's transaction.** All three methods use propagation `REQUIRED`. Tests show that a caller's rollback
-undoes a reservation, and that other connections do not see it before the caller commits.
+undoes a reservation, and that other connections do not see it before the caller commits. The rules callers must
+follow are in the Javadoc of `InventoryReservations`:
+
+- READ COMMITTED isolation;
+- one basket reserved and one reservation released per transaction;
+- keep the transaction short and reserve last, because locks are held until the caller commits, even after
+  `Rejected`.
 
 **A late confirm never succeeds.** Expired means `now ≥ expiresAt`, the same boundary the sweeper's
-`expires_at <= :now` uses. `confirm` on such a hold returns the stock, marks it `EXPIRED`, appends
-`ReservationExpiredV1` and throws `ReservationNoLongerHeldException`. The method is annotated
-`@Transactional(noRollbackFor = ReservationNoLongerHeldException.class)`. Without that, the exception would mark
-ordering's transaction rollback-only: ordering catches the exception to abandon its order, and its commit would then
-fail with `UnexpectedRollbackException` and undo the expiry. A test runs exactly that caller pattern.
+`expires_at <= :now` uses. `confirm` on such a hold expires it (status, event, stock) and throws
+`ReservationNoLongerHeldException`. The method is annotated `@Transactional(noRollbackFor = ...)`. The exception
+therefore does not mark the caller's transaction rollback-only: ordering can catch it, abandon its order and commit,
+and the expiry commits with it. The API Javadoc states this; a test runs exactly that caller pattern.
 
-**Holds expire exactly once.** The sweeper takes batches with `FOR UPDATE SKIP LOCKED` (a CTE so that `LIMIT` counts
-reservations, not lines) through the partial index on `expires_at WHERE status = 'HELD'`. Each batch is its own
-transaction. Concurrent sweepers take disjoint batches and never wait for each other. A hold that is being confirmed
-right now is skipped, not double-handled.
+**Holds expire exactly once, and one bad hold cannot stall the rest.** The sweeper takes batches with
+`FOR UPDATE SKIP LOCKED` (a CTE, so that `LIMIT` counts reservations, not lines) through the partial index on
+`expires_at WHERE status = 'HELD'`. Each batch is its own transaction. Concurrent sweepers take disjoint batches and
+never wait for each other. The queue is ordered across all stores. So if a batch fails (for example, one hold's stock
+rows are inconsistent), the sweeper:
 
-**Adjustments.** The store is checked first (`StoreDirectory`, 404), then the SKU (`ProductCatalog`, 422). Then the
-level row is created if missing (`INSERT ... ON CONFLICT DO NOTHING`), so there is always a row to lock, and locked.
-The domain refuses a result below `reserved` (409). The change is applied with a guarded update. The audit entry and
-`StockAdjustedV1` are appended in the same transaction. A refused change writes nothing.
+1. counts it (`daqiqa.inventory.expiry.failures{scope=batch}`);
+2. retries the same holds one per transaction, each locked with `SKIP LOCKED`;
+3. counts (`scope=hold`) and logs a hold that still fails, which stays held;
+4. lets the healthy holds expire.
+
+The loop ends when a batch is not full or expires nothing, so a sweep always terminates. The gauge
+`daqiqa.inventory.expiry.oldest.overdue` reads the longest-overdue hold from the database at each scrape. It keeps
+rising whatever stalls expiry, a sweeper that stopped running included.
+
+**Adjustments.** The steps, all in one transaction:
+
+1. check the store (`StoreDirectory`, 404), then the SKU (`ProductCatalog`, 422);
+2. create the level row if it is missing (`INSERT ... ON CONFLICT DO NOTHING`), so there is always a row to lock, and
+   lock it;
+3. let the domain refuse a result below `reserved` (409);
+4. apply the change with a guarded update;
+5. append the audit entry and `StockAdjustedV1`.
+
+A refused change writes nothing.
 
 ### Decisions and deviations
 
@@ -200,36 +248,57 @@ The domain refuses a result below `reserved` (409). The change is applied with a
    only per reservation. Reservation 1 could lock `B` and reservation 2 then `A`, which can deadlock with a basket
    `[A, B]`. The sweeper sums the batch's lines per (store, SKU) (`HeldUnits.heldBy`) and returns them with one locked,
    sorted pair of statements.
-2. **A late confirm also appends `ReservationExpiredV1`** (the specification says every expiry is announced). It is
-   counted under `trigger=late_confirm`.
-3. **Scheduling uses a `SchedulingConfigurer` bean instead of `@Scheduled`.** The behaviour is the same (fixed delay
-   `daqiqa.inventory.expiry.interval`), but the interval comes from the bound `InventoryProperties`, so the default
-   lives in one place. The task registers only where `@EnableScheduling` is on (the server), and tests call
-   `sweep()` directly. Each run drains every hold elapsed at its start, `batch-size` at a time, and always ends.
-4. **Adjustments lock, then let the domain decide (`StockLevel.adjust`), instead of using one upsert statement.** The
-   rule is then unit- and property-tested in one place. Two first deliveries of a SKU queue on the same row, and a
-   test checks that 20 of them all count. An adjustment that would leave a negative quantity on hand is also
-   `STOCK_BELOW_RESERVED`: since `reserved ≥ 0`, on hand below zero is on hand below reserved. The detail message
-   gives the numbers.
-5. **`StockAdjustedV1.eventId` is the audit entry's id**: one fact, one id.
-6. **Times are truncated to microseconds** (`Timestamps`), the precision PostgreSQL stores. A replayed reservation
+2. **Ending order: statuses, then events, then stock.** The review suggested events, then stock, then statuses. This
+   order puts the status update first instead of last. The update touches only reservation rows the transaction
+   already holds, so doing it first keeps the hot stock rows locked for even less time. It also lets a stale
+   transition fail before any other work.
+3. **A late confirm and a run-out replay also append `ReservationExpiredV1`**: the specification says every expiry is
+   announced. They are counted under `trigger=late_confirm` and `trigger=replay`.
+4. **Counters of changes count after commit; counters of answers count at once.**
+   - Changes: holds placed (`reservations{outcome=reserved}`), released and expired count only once their
+     transaction commits. A change the caller rolls back never happened.
+   - Answers: `rejected` and `replayed` count immediately. The caller was given that answer whatever became of its
+     transaction; a rejection whose caller rolls back its empty transaction must still show.
+5. **Scheduling uses a `SchedulingConfigurer` bean instead of `@Scheduled`.**
+   - The behaviour is the same: a fixed delay of `daqiqa.inventory.expiry.interval`.
+   - The interval comes from the bound `InventoryProperties`, so the default lives in one place.
+   - The task registers only where `@EnableScheduling` is on (the server); tests call `sweep()` directly.
+6. **Adjustments lock, then let the domain decide (`StockLevel.adjust`), instead of using one upsert statement.**
+   - The rule is unit- and property-tested in one place.
+   - Two first deliveries of a SKU queue on the same row; a test checks that 20 of them all count.
+   - A change that would leave a negative quantity on hand is also `STOCK_BELOW_RESERVED`: on hand below zero is on
+     hand below reserved. The problem carries `sku`, `onHand`, `reserved` and `delta`.
+7. **`StockAdjustedV1.eventId` is the audit entry's id**: one fact, one id.
+8. **Times are truncated to microseconds** (`Timestamps`), the precision PostgreSQL stores. A replayed reservation
    therefore reports exactly the `expiresAt` the first call reported.
-7. **`AvailabilityQuery` does not open a transaction.** A single statement is consistent on its own, and the hot path
+9. **`AvailabilityQuery` does not open a transaction.** A single statement is consistent on its own, and the hot path
    saves the `COMMIT` round trip. It still joins a caller's transaction if there is one.
-8. **Unknown reservation ids** in `confirm` / `release` throw `IllegalArgumentException`: the API has no "not found"
-   outcome, and an id `reserve` never returned is a caller bug.
-9. **A replay returns the existing reservation unchanged even if the basket differs**, as the API contract says.
-   Ordering's idempotency key (with its request hash) catches key reuse upstream.
-10. **`release` appends no event.** Only expiries and adjustments are announced. The reason is stored in
-    `release_reason` and counted.
-11. **Schema additions:** CHECKs on status and reason values; `reservation_reason_iff_ended` (a reason exactly when
-    the reservation ended); an append-only trigger on `stock_adjustment`; the index `(store_id, sku, created_at DESC)`
-    for audit look-ups.
-12. **HTTP details.** `GET` removes repeated SKUs and keeps first-occurrence order. `VALIDATION_FAILED` covers bean
-    validation, a missing `sku` and more than 100 SKUs. `INVALID_REQUEST` covers unreadable JSON, unknown enum values
-    and malformed store ids or SKUs (rejected by the value objects). `@NonZero` implements the contract's
-    `not: {const: 0}`. The problem handler is scoped to the stock controller and ordered first, so it wins over the
-    server's application-wide problem-details handler. The slice test enables that handler to prove it.
+10. **Unknown reservation ids** in `confirm` / `release` throw `IllegalArgumentException`: the API has no "not found"
+    outcome, and an id `reserve` never returned is a caller bug.
+11. **A replay returns the existing reservation unchanged even if the basket differs**, as the API contract says.
+    Ordering's idempotency key (with its request hash) catches key reuse upstream. The only exception is a hold whose
+    time has run out (see above).
+12. **`release` appends no event.** Only expiries and adjustments are announced. The reason is recorded on the
+    reservation (`EndReason`, column `release_reason`) and counted. The API's `ReleaseReason` maps to `EndReason`
+    through an exhaustive switch: a reason added to the API does not compile until the domain knows it.
+13. **Schema, compared with the suggested one:**
+    - `stock_level.version` is dropped: nothing read it. Tests tell written rows from untouched ones by `updated_at`.
+    - Added: CHECKs on the status and reason values.
+    - Added: `reservation_reason_iff_ended`, which the domain mirrors: a reason is present exactly when the
+      reservation has ended.
+    - Added: an append-only trigger on `stock_adjustment`.
+    - Added: the index `(store_id, sku, created_at DESC)` for audit look-ups.
+14. **HTTP details.**
+    - `GET` removes repeated SKUs and keeps first-occurrence order.
+    - `VALIDATION_FAILED` covers bean validation, a missing `sku` and more than 100 SKUs.
+    - `INVALID_REQUEST` covers unreadable JSON, unknown enum values and malformed store ids or SKUs.
+    - Identifiers are parsed from the path, query and body through `Identifiers`. Only that parse failure maps to
+      400; any other `IllegalArgumentException` stays a server error and does not echo its message.
+    - Problems carry the offending values: `storeId` on `STORE_NOT_FOUND`, `sku` on `UNKNOWN_SKU`, and `sku`,
+      `onHand`, `reserved`, `delta` on `STOCK_BELOW_RESERVED`. RFC 9457 allows these extension members. The OpenAPI
+      `Problem` schema could list them.
+    - The problem handler is scoped to the stock controller and ordered first, so it wins over the server's
+      application-wide problem-details handler. The slice test enables that handler to prove it.
 
 ### Configuration
 
@@ -245,24 +314,26 @@ Invalid values (zero or negative) fail the startup. The module needs a `java.tim
 
 | Meter | Type | Tags | Meaning |
 |---|---|---|---|
-| `daqiqa.inventory.reservations` | counter | `outcome` = `reserved` \| `rejected` \| `replayed` | Reservation attempts |
-| `daqiqa.inventory.releases` | counter | `reason` = lower-case `ReleaseReason` | Reservations released on request |
-| `daqiqa.inventory.expirations` | counter | `trigger` = `sweeper` \| `late_confirm` | Holds that expired unconfirmed (a tag added to the specification) |
+| `daqiqa.inventory.reservations` | counter | `outcome` = `reserved` \| `rejected` \| `replayed` | Reservation attempts (`reserved` after commit) |
+| `daqiqa.inventory.releases` | counter | `reason` = lower-case `ReleaseReason` | Reservations released on request (after commit) |
+| `daqiqa.inventory.expirations` | counter | `trigger` = `sweeper` \| `late_confirm` \| `replay` | Holds that expired unconfirmed (after commit; the tag is an addition) |
+| `daqiqa.inventory.expiry.failures` | counter | `scope` = `batch` \| `hold` | Failed attempts to expire holds: alert on `hold` |
+| `daqiqa.inventory.expiry.oldest.overdue` | gauge (seconds) | | How long ago the longest-overdue hold should have expired: alert above a few sweep intervals |
 | `daqiqa.inventory.reserve` | timer (percentile histogram) | | Deciding and applying a reservation, including waiting for row locks |
 
 ### Tests and what they prove
 
-121 tests; `./gradlew :modules:inventory:build` is green. Every PostgreSQL test runs against a real server.
+138 tests; `./gradlew :modules:inventory:build` is green. Every PostgreSQL test runs against a real server.
 
 | Kind | Tests | Proves |
 |---|---|---|
-| Domain unit | 34 | Invariants of `StockLevel`, shortfalls, every state-machine transition including the expiry boundary |
-| Property (jqwik, 1,000 tries each) | 2 | Random sequences of reserve, confirm, release, sweep, clock and adjust keep `0 ≤ reserved ≤ onHand` and `reserved = Σ active holds`; a basket has no shortfall exactly when every line is covered |
-| Application unit | 12 | The race-only branches of `reserve`, played deterministically; the sweeper's batching loop; guards |
-| Persistence (PostgreSQL) | 24 | Every repository statement; locks proven with `lock_timeout` (SQLState 55P03) and `pg_stat_activity` instead of sleeps; `SKIP LOCKED`; the unique-index wait on commit and on rollback; CHECK constraints; the append-only trigger |
-| Application integration (Spring + PostgreSQL) | 28 | Reserve, reject-writes-nothing, idempotency, a caller's rollback and visibility, confirm, late confirm (also inside a caller that catches and commits), release, sweeper, adjustments (404, 422, 409, audit entry, event), availability, metrics |
-| Concurrency (PostgreSQL) | 6 | 200 threads × 1 of 50 units → exactly 50 held, 150 rejected, no exceptions; opposite-order baskets → no deadlock, reserved equals the successful baskets; a mix of every operation → the books balance; simultaneous first calls with one reference → one hold, on both race paths; 6 sweepers → each of 300 holds expired once |
-| Web slice | 11 | Both endpoints: JSON shape, status codes, problem `type` and `code`, precedence over the global handler |
+| Domain unit | 35 | Invariants of `StockLevel`, shortfalls, every state-machine transition (including the expiry boundary and the end-reason invariant) |
+| Property (jqwik, 1,000 tries each) | 2 | Random sequences of reserve, confirm, release, sweep, clock and adjust keep `0 ≤ reserved ≤ onHand` and `reserved = Σ active holds`, with every transition leaving the current state; a basket has no shortfall exactly when every line is covered |
+| Application unit | 15 | The race-only branches of `reserve` (including a run-out hold swept while the call waited for its lock), played deterministically; the sweeper's batching, fallback and termination; guards |
+| Persistence (PostgreSQL) | 27 | Every repository statement; the SQL refusing a double release and a re-expiry; locks proven with `lock_timeout` (SQLState 55P03) and `pg_stat_activity` (polled on its own connection) instead of sleeps; `SKIP LOCKED`; the unique-index wait on commit and on rollback; CHECK constraints; the append-only trigger |
+| Application integration (Spring + PostgreSQL) | 36 | Reserve, reject-writes-nothing, idempotency, replay after run-out (fresh, rejected, other store, confirmed), a caller's rollback and visibility, confirm, late confirm (also inside a caller that catches and commits), release, sweeper (including a poison hold, the gauge, and stock rows free while events are appended), adjustments (404, 422, 409, audit entry, event), availability, metrics (including after-commit counting) |
+| Concurrency (PostgreSQL) | 7 | 200 threads × 1 of 50 units → exactly 50 held, 150 rejected, no exceptions; opposite-order baskets → no deadlock, reserved equals the successful baskets; a mix of every operation → the books balance; simultaneous first calls with one reference → one hold, on both race paths; 6 sweepers → each of 300 holds expired once; retries of run-out holds racing checkouts and sweepers → each expired once, no deadlock |
+| Web slice | 12 | Both endpoints: JSON shape, status codes, problem `type`, `code` and properties, precedence over the global handler, and that a server-side `IllegalArgumentException` is not blamed on the client |
 | Configuration | 3 | Defaults, binding, validation; the schedule, checked without starting a thread |
 | Architecture | 1 | `ArchitectureRules.moduleRules("inventory")` |
 
@@ -276,28 +347,33 @@ fail.
 - Rows are locked one by one in basket order (PostgreSQL reports `deadlock detected`).
 - Elapsed holds are taken without row locks.
 - The problem handler loses its `@Order`.
+- The status guard is removed from transitions.
+- Stock is released before the events are appended.
 
 ### Notes for the other modules
 
 - **ordering**
-  - Call `reserve` inside T1.
+  - Call `reserve` inside T1, as its last step.
   - Call `confirm` inside T2 and catch `ReservationNoLongerHeldException` there: the expiry commits with T2.
   - Release reservations one per transaction. For example, the abandoned-order sweeper should release each order in
     its own transaction: releasing several in one transaction locks their stock rows out of order and can deadlock
     with checkouts.
 - **promise:** `AvailabilityQuery` costs one statement for all candidate stores × SKUs. Missing entries mean zero.
-- **server:** Scheduling must be enabled for holds to expire in the background. `confirm` enforces expiry on its own
-  either way.
+- **server:** Scheduling must be enabled for holds to expire in the background. `confirm` and a replay enforce expiry
+  on their own either way.
 
 ### Known gaps, risks and next steps
 
+- **Stock adjustments are not idempotent.** A retried `RECEIVED +24` counts twice. The contract is unchanged for now.
+  Next: an `Idempotency-Key` header, as for orders (ADR-0008), or a client adjustment id with a unique constraint on
+  `stock_adjustment`, so a retry returns the first result.
 - **Unbounded lock waits.** A transaction that holds a hot stock row and stalls blocks every checkout of that SKU,
   and each waiter holds a pooled connection. Next: `SET LOCAL lock_timeout` in `reserve` (or a pool-wide
   `statement_timeout`) and a retryable error.
 - **Hot items.** One row per (store, SKU) serialises reservations of that item. Measure in the load-test wave. ADR-0005
   names the next step: a Redis pre-reservation layer in front of the same guarantee.
-- **A poison batch stalls expiry.** If the books of some row are inconsistent (a manual edit, say), its batch fails
-  every run. Next: on a batch failure, retry reservations one by one, park the offender and alert.
+- **A poison hold stays held** until someone repairs its stock rows; the failure counter and the overdue gauge make
+  it visible. Next: a runbook, and parking such holds so each sweep does not retry them.
 - **Same-reference reserve during that reference's release** can form a lock cycle. This needs a caller bug.
   PostgreSQL detects the cycle within `deadlock_timeout`, one call fails and can retry.
 - **Growth.** Ended reservations are kept forever. Next: retention or archival, possibly partitioning by
@@ -306,5 +382,3 @@ fail.
   - the `COMMITTED` status (picked: `onHand` and `reserved` both decrease);
   - sign rules per adjustment reason (`RECEIVED` > 0, `DAMAGED` < 0);
   - an endpoint to read the audit trail.
-- **Repository hygiene.** The root `.gitignore` rule `out/` also ignores hexagonal `adapter/out/` packages. This module
-  re-includes them with `modules/inventory/.gitignore`. The root fix is one line after `out/`: `!**/src/**/out/`.
