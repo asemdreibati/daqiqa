@@ -22,6 +22,25 @@ class OutboxRepository {
 
     private static final int MAX_ERROR_LENGTH = 2_000;
 
+    /*
+     * The relay's statements, each written so that the partial index on unpublished rows applies: every one repeats
+     * the index predicate (published_at IS NULL). OutboxQueryPlanTest keeps it that way.
+     */
+
+    static final String LOCK_NEXT_BATCH = """
+            SELECT id, seq, type, topic, partition_key, payload, occurred_at, attempts
+            FROM messaging.outbox_event
+            WHERE published_at IS NULL
+            ORDER BY seq
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED""";
+
+    static final String MARK_PUBLISHED = """
+            UPDATE messaging.outbox_event SET published_at = :publishedAt
+            WHERE seq = ANY(:seqs) AND published_at IS NULL""";
+
+    static final String COUNT_UNPUBLISHED = "SELECT count(*) FROM messaging.outbox_event WHERE published_at IS NULL";
+
     private final JdbcClient jdbc;
 
     OutboxRepository(JdbcClient jdbc) {
@@ -68,13 +87,7 @@ class OutboxRepository {
      * and still never publishes a row that is being published.
      */
     List<PendingEvent> lockNextBatch(int limit) {
-        return jdbc.sql("""
-                        SELECT id, seq, type, topic, partition_key, payload, occurred_at, attempts
-                        FROM messaging.outbox_event
-                        WHERE published_at IS NULL
-                        ORDER BY seq
-                        LIMIT :limit
-                        FOR UPDATE SKIP LOCKED""")
+        return jdbc.sql(LOCK_NEXT_BATCH)
                 .param("limit", limit)
                 .query(OutboxRepository::pendingEvent)
                 .list();
@@ -85,7 +98,7 @@ class OutboxRepository {
             return;
         }
         long[] seqs = events.stream().mapToLong(PendingEvent::seq).toArray();
-        jdbc.sql("UPDATE messaging.outbox_event SET published_at = :publishedAt WHERE seq = ANY(:seqs)")
+        jdbc.sql(MARK_PUBLISHED)
                 .param("publishedAt", utc(publishedAt))
                 .param("seqs", seqs)
                 .update();
@@ -103,9 +116,7 @@ class OutboxRepository {
 
     /** Served by the partial index on unpublished rows, so it stays cheap even with a large table. */
     long countUnpublished() {
-        return jdbc.sql("SELECT count(*) FROM messaging.outbox_event WHERE published_at IS NULL")
-                .query(Long.class)
-                .single();
+        return jdbc.sql(COUNT_UNPUBLISHED).query(Long.class).single();
     }
 
     /**
