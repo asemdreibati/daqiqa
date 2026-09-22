@@ -43,9 +43,16 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Every method joins the caller's transaction when there is one (propagation {@code REQUIRED}), so an order and its
  * reservation commit or roll back together, and starts its own otherwise.
  *
- * <p>Locks are always taken in the same order, so concurrent calls queue instead of deadlocking: confirming, releasing
- * and expiring lock the reservation row first and its stock rows second; reserving locks only stock rows before it
- * inserts a new reservation; and any statement that locks several stock rows locks them by store, then SKU.
+ * <p>Locks are always taken in the same order, so concurrent calls queue instead of deadlocking:
+ *
+ * <ul>
+ *   <li>confirming, releasing and expiring (including a retry expiring its reference's run-out hold) lock the
+ *       reservation row first and its stock rows second;
+ *   <li>reserving locks only stock rows before it inserts a new reservation;
+ *   <li>any statement that locks several stock rows locks them by store, then SKU.
+ * </ul>
+ *
+ * <p>Ending reservations locks those hot stock rows last (see {@code expire}).
  */
 @Service
 public class ReservationService implements InventoryReservations {
@@ -148,8 +155,8 @@ public class ReservationService implements InventoryReservations {
     private Optional<Reservation> expireRunOutHold(Reservation runOut, ReservationRequest request, Instant now) {
         Reservation locked = lockExisting(runOut.id());
         if (!locked.isHeldPast(now)) {
-            // Changed while this call waited for the lock: replay it if it still holds stock, else the reference is
-            // free.
+            // Changed while this call waited for the lock: still active means replay it, ended means the reference
+            // is free.
             return locked.status().holdsStock() ? Optional.of(locked) : Optional.empty();
         }
         Set<StockKey> rows = new TreeSet<>(locked.stockKeys());
