@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.daqiqa.inventory.support.InventoryTables;
 import io.daqiqa.testing.postgres.PostgresTestDatabase;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.concurrent.ExecutionException;
@@ -88,18 +91,35 @@ abstract class PostgresRepositoryTest {
                                 cause -> assertThat(cause.getSQLState()).isEqualTo("55P03")));
     }
 
-    /** Waits until some other session is blocked on a lock: proof that it is queueing behind the caller. */
+    /**
+     * Waits until some other session is blocked on a lock: proof that it is queueing behind the caller.
+     *
+     * <p>Polls on a connection of its own, in autocommit. {@code pg_stat_activity} is snapshotted once per
+     * transaction, so polling inside the caller's (still open) transaction would keep reading the first answer.
+     */
     void awaitAnotherSessionWaitingForALock() throws InterruptedException {
         for (int attempt = 0; attempt < 500; attempt++) {
-            Integer waiting = jdbc.sql("""
-                            SELECT count(*)::int
-                              FROM pg_stat_activity
-                             WHERE datname = current_database() AND wait_event_type = 'Lock'""").query(Integer.class).single();
-            if (waiting > 0) {
+            if (sessionsWaitingForALock() > 0) {
                 return;
             }
             Thread.sleep(10);
         }
         throw new AssertionError("No session started waiting for a lock");
+    }
+
+    private static int sessionsWaitingForALock() {
+        try (Connection connection = DATABASE.dataSource().getConnection();
+                PreparedStatement waiting = connection.prepareStatement("""
+                        SELECT count(*)
+                          FROM pg_stat_activity
+                         WHERE datname = current_database() AND wait_event_type = 'Lock'""")) {
+            connection.setAutoCommit(true);
+            try (ResultSet count = waiting.executeQuery()) {
+                count.next();
+                return count.getInt(1);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }
