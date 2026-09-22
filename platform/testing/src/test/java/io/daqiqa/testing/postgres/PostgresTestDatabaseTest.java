@@ -2,6 +2,7 @@ package io.daqiqa.testing.postgres;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.zaxxer.hikari.HikariConfig;
 import org.junit.jupiter.api.Test;
 
 class PostgresTestDatabaseTest {
@@ -23,5 +24,21 @@ class PostgresTestDatabaseTest {
         assertThat(PostgresTestDatabase.createdBefore("daqiqa_test_0123456789abcdef", 2000))
                 .as("names from the previous scheme are always stale")
                 .isTrue();
+    }
+
+    @Test
+    void keepsTwoConnectionsOpenWhileIdleAndOpensUpToSixtyFourUnderLoad() {
+        HikariConfig config = PostgresTestDatabase.poolConfig("jdbc:postgresql://localhost:5432/t", "user", "secret");
+
+        assertThat(config.getMaximumPoolSize()).isEqualTo(64);
+        assertThat(config.getMinimumIdle()).isEqualTo(2);
+        assertThat(config.getIdleTimeout()).isEqualTo(30_000);
+    }
+
+    @Test
+    void startsTheContainerWithRoomForThreeHundredConnectionsAndKeepsFsyncOff() {
+        // Only configured, never started: this needs no Docker.
+        assertThat(PostgresTestDatabase.container().getCommandParts())
+                .containsExactly("postgres", "-c", "fsync=off", "-c", "max_connections=300");
     }
 }

@@ -7,13 +7,14 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -25,7 +26,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * <p>Two modes behind one API:
  *
  * <ul>
- *   <li><b>Testcontainers</b> (default, used in CI): a {@code postgres:17-alpine} container is started once per JVM.
+ *   <li><b>Testcontainers</b> (default, used in CI): a {@code postgres:17-alpine} container is started once per JVM, with
+ *       room for {@value #MAX_SERVER_CONNECTIONS} connections (see {@link #container()}).
  *   <li><b>External server</b>: when {@code DAQIQA_TEST_PG_URL} is set (for example
  *       {@code jdbc:postgresql://localhost:5432/postgres}), a uniquely named database is created on that server;
  *       databases older than an hour are dropped by later runs. Credentials come from {@code DAQIQA_TEST_PG_USER} / {@code DAQIQA_TEST_PG_PASSWORD}
@@ -40,25 +42,52 @@ public final class PostgresTestDatabase {
     private static final String IMAGE = "postgres:17-alpine";
     private static final String DATABASE_PREFIX = "daqiqa_test_";
     private static final long STALE_AFTER_SECONDS = 3_600;
+
+    /** Enough for the concurrency tests, which run many threads against real locks. */
+    static final int MAX_POOL_SIZE = 64;
+
+    /** Connections kept open while the pool is idle; the rest are opened on demand and closed again after a while. */
+    static final int MIN_IDLE = 2;
+
+    /** How long a connection above {@link #MIN_IDLE} may sit idle before it is closed (Hikari's minimum is 10 s). */
+    static final Duration IDLE_TIMEOUT = Duration.ofSeconds(30);
+
+    /** The container's connection limit: PostgreSQL's default of 100 is less than one test JVM may need at its peak. */
+    static final int MAX_SERVER_CONNECTIONS = 300;
+
     private static volatile PostgresTestDatabase shared;
 
     private final String jdbcUrl;
     private final String username;
     private final String password;
     private final HikariDataSource dataSource;
-    private final Set<String> migratedLocations = ConcurrentHashMap.newKeySet();
+
+    /** Every location migrated so far in this JVM; guarded by {@code this}. */
+    private final Set<String> migratedLocations = new LinkedHashSet<>();
 
     private PostgresTestDatabase(String jdbcUrl, String username, String password) {
         this.jdbcUrl = jdbcUrl;
         this.username = username;
         this.password = password;
+        this.dataSource = new HikariDataSource(poolConfig(jdbcUrl, username, password));
+    }
+
+    /**
+     * Up to {@value #MAX_POOL_SIZE} connections for concurrency tests, but only {@value #MIN_IDLE} kept open while
+     * idle. Hikari's default keeps the pool full (minimum idle = maximum): every test JVM would hold 64 connections
+     * from its first query on and, with two of the server's Spring contexts (20 connections each), more than the 100 a
+     * default PostgreSQL accepts.
+     */
+    static HikariConfig poolConfig(String jdbcUrl, String username, String password) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(jdbcUrl);
         config.setUsername(username);
         config.setPassword(password);
-        config.setMaximumPoolSize(64);
+        config.setMaximumPoolSize(MAX_POOL_SIZE);
+        config.setMinimumIdle(MIN_IDLE);
+        config.setIdleTimeout(IDLE_TIMEOUT.toMillis());
         config.setPoolName("test-db");
-        this.dataSource = new HikariDataSource(config);
+        return config;
     }
 
     /** The database for this JVM, created on first use. */
@@ -81,9 +110,19 @@ public final class PostgresTestDatabase {
         if (externalUrl != null && !externalUrl.isBlank()) {
             return createOnExternalServer(externalUrl.trim());
         }
-        PostgreSQLContainer container = new PostgreSQLContainer(IMAGE);
+        PostgreSQLContainer container = container();
         container.start();
         return new PostgresTestDatabase(container.getJdbcUrl(), container.getUsername(), container.getPassword());
+    }
+
+    /**
+     * The container, not yet started. Its command is the image's default one ({@code fsync=off}, which Testcontainers
+     * sets and a replaced command would lose) plus a connection limit of {@value #MAX_SERVER_CONNECTIONS}: a test JVM
+     * holds this class's pool and, in the server's tests, one pool of 20 per Spring context.
+     */
+    static PostgreSQLContainer container() {
+        return new PostgreSQLContainer(IMAGE)
+                .withCommand("postgres", "-c", "fsync=off", "-c", "max_connections=" + MAX_SERVER_CONNECTIONS);
     }
 
     private static PostgresTestDatabase createOnExternalServer(String adminUrl) {
@@ -148,27 +187,34 @@ public final class PostgresTestDatabase {
         return password;
     }
 
-    /** A pooled data source (up to 64 connections, enough for concurrency tests). Do not close it. */
+    /**
+     * A pooled data source: up to {@value #MAX_POOL_SIZE} connections, enough for concurrency tests, of which only
+     * {@value #MIN_IDLE} stay open while idle. Do not close it.
+     */
     public DataSource dataSource() {
         return dataSource;
     }
 
     /**
-     * Runs Flyway migrations from the given locations, for example {@code "classpath:db/migration/inventory"}. Each
-     * location is migrated once per JVM; calling again is a no-op.
+     * Runs Flyway migrations from the given locations, for example {@code "classpath:db/migration/inventory"}.
+     * Calling again with locations already migrated is a no-op.
+     *
+     * <p>Flyway is always given <em>every</em> location migrated so far in this JVM, not only the new ones. Its
+     * validation fails on an applied migration it cannot resolve ("applied migration not resolved locally"), so
+     * migrating only the new locations broke whenever a test class asked for other schemas than a class that ran
+     * before it: the outcome depended on the order in which the classes ran.
      */
     public synchronized PostgresTestDatabase migrate(String... locations) {
-        List<String> pending = Arrays.stream(locations)
-                .filter(location -> !migratedLocations.contains(location))
-                .toList();
-        if (!pending.isEmpty()) {
+        Set<String> union = new LinkedHashSet<>(migratedLocations);
+        union.addAll(Arrays.asList(locations));
+        if (union.size() > migratedLocations.size()) {
             Flyway.configure()
                     .dataSource(dataSource)
-                    .locations(pending.toArray(String[]::new))
+                    .locations(union.toArray(String[]::new))
                     .outOfOrder(true) // modules own disjoint version ranges; see docs/engineering/conventions.md
                     .load()
                     .migrate();
-            migratedLocations.addAll(pending);
+            migratedLocations.addAll(union); // only once Flyway succeeded: a failed migration is retried next call
         }
         return this;
     }
