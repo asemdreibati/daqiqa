@@ -33,3 +33,16 @@ the provider's idempotency key.
 - **Client-side deduplication only**: not under our control.
 - **Unique constraint on (customer, basket, minute)**: blocks legitimate repeat orders and still double-charges on
   some races.
+
+## Amendment (2026-09-22, wave-1 review)
+
+- **The order id is fixed when the key is first claimed** and reused as the reservation reference, the payment
+  provider's idempotency key and the order's primary key. A retry that takes over an abandoned claim therefore resumes
+  the same order instead of creating a second order, hold and authorization.
+- **Every checkout transaction locks the key row first**, so an attempt that stalled past its lease cannot overwrite the
+  outcome of a newer one.
+- **Replays are byte-exact** (the response is rendered once and stored as text) and carry `Idempotent-Replayed: true`.
+  `Retry-After` on an in-progress key is capped at 2 s: the first attempt usually finishes in well under a second.
+- **A promise converts to at most one live order.** A partial unique index on `promise_id` for live orders is the
+  guarantee; a per-promise advisory lock taken before any stock is held makes the answer deterministic when checkouts
+  race, so the loser is told `PROMISE_ALREADY_USED` rather than sometimes `OUT_OF_STOCK`.

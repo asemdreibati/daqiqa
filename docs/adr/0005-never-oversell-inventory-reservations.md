@@ -44,3 +44,18 @@ the same popular items from the same store at the same moment, and baskets conta
   mechanism.
 - **Serializable isolation**: correct but turns contention into serialization failures that every caller must retry.
 - **Redis as the source of truth**: fast, but loses the atomic commit with the order and the durability guarantees.
+
+## Amendments (2026-09-22, wave-1 review)
+
+The decision stands; the review sharpened four details of how it is carried out.
+
+- **Sweeps lock a whole batch in (store, SKU) order.** Returning each expired reservation's stock in SKU order, one
+  reservation after another, can deadlock against a multi-line basket that locks the same rows in a different
+  interleaving. The sweeper returns the batch's stock in one ordered pass.
+- **Every status transition is guarded in SQL.** Updates apply only `AND status = <expected current status>` and assert
+  the row count, so a release or expiry applied twice fails loudly instead of returning stock twice (which no `CHECK`
+  constraint could catch: `reserved` would silently drop too low).
+- **A replay never hands back a dead hold.** Reserving again for a reference whose hold has run out but not yet been
+  swept expires it first (reservation, then its rows and the basket's rows in one sorted lock), then reserves afresh.
+- **Lock waits are bounded.** Every connection sets `lock_timeout = '3s'`: a checkout stuck behind a hot row fails fast
+  and is retried with its idempotency key; sweepers and the relay never wait (`SKIP LOCKED`, try-locks).

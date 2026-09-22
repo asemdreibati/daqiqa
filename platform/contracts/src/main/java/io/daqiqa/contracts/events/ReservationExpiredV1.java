@@ -6,7 +6,8 @@ import java.util.UUID;
 
 /**
  * Stock held for {@code reference} (usually an order id) was released because the hold timed out before the order
- * was confirmed. Ordering reacts by abandoning the order if it is still waiting.
+ * was confirmed. Ordering does not need this event to stay consistent (its own sweeper abandons orders whose hold
+ * has run out); it is published for analytics and for services outside the monolith.
  */
 public record ReservationExpiredV1(
         UUID eventId, Instant occurredAt, UUID reservationId, String storeId, String reference, List<LineItemV1> lines)

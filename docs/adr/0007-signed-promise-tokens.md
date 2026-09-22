@@ -28,3 +28,18 @@ without downtime. Default validity: 90 seconds.
 - **Server-side promise records**: simple, but a write per promise and a lookup per checkout.
 - **JWT library**: a standard format, but brings algorithm-negotiation pitfalls and a dependency for a payload we fully
   control. The format is small enough to implement and test exhaustively.
+
+## Amendment (2026-09-22, wave-1 review)
+
+The review found two ways a valid token could still be honoured wrongly, and both are now closed:
+
+- **The token binds the location.** Travel time — and therefore the promise — depends on where the order goes. The
+  payload now carries the promised location (`latE6|lngE6`), and checkout refuses a delivery location more than
+  `daqiqa.promise.token.location-tolerance` (100 m) away with `LOCATION_MISMATCH`, so an address edited after the quote
+  triggers a new quote instead of an impossible promise.
+- **A paused store stops honouring its tokens.** Verification also checks that the promised store still accepts orders
+  (`STORE_UNAVAILABLE`), from the in-memory network view. On other replicas that view can be up to 30 s stale until
+  status changes travel as events (roadmap).
+
+Tokens are still stateless and reusable within their 90 s window; a promise converts to at most one *live* order,
+which ordering enforces (ADR-0008).

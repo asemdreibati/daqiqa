@@ -37,7 +37,7 @@ paths:
       description: |
         Finds the fastest dark store that can deliver the whole basket to the location and returns the promised
         ETA, its tier, a breakdown of where the minutes go, and a signed token valid for a short window (90 s by
-        default). The token is required to place the order.
+        default). The token is required to place the order and binds the store, tier, ETA, basket and this location.
 
         "We cannot deliver this" is a normal answer (`status: UNAVAILABLE`), not an error. When a faster option
         exists by dropping items, `suggestions` says so.
@@ -60,13 +60,13 @@ paths:
               example:
                 status: AVAILABLE
                 offer:
-                  promiseId: 0192f7c4-7c1e-7cc2-9d3a-2f1a6c0e9b11
+                  promiseId: 01a0c9d1-e1a3-7467-a717-b38a42e03361
                   storeId: DXB-MARINA
                   tier: EXPRESS_15
-                  etaMinutes: 12
-                  expiresAt: '2026-09-22T12:01:30Z'
-                  token: v1.k1.MDE5MmY3YzQtN2MxZS03Y2MyLTlkM2EtMmYxYTZjMGU5YjExfERYQi1NQVJJTkF8...
-                  breakdown: { queueSeconds: 120, pickSeconds: 96, riderWaitSeconds: 60, travelSeconds: 330, bufferSeconds: 90 }
+                  etaMinutes: 7
+                  expiresAt: '2026-09-22T15:54:20Z'
+                  token: v1.dev.MDFhMGM5ZDEtZTFhMy03NDY3LWE3MTctYjM4YTQyZTAzMzYxfERYQi1NQVJJTkF8RVhQUkVTU18xNXw3fDE3OTAwOTIzNzB8MTc5MDA5MjQ2MHxTYjQ4Q0g2TVAtX3dMV3FVaDA4ak9nTC1xVjdYUXRveS01RXZtWENkLXp3fDI1MDc3MjAwfDU1MTM5MDAw.bg9JJpiWQpoDhXcCSMJqjUtzKaQ2xnFLhGtrlQazyJI
+                  breakdown: { queueSeconds: 60, pickSeconds: 69, riderWaitSeconds: 60, travelSeconds: 133, bufferSeconds: 90 }
                 suggestions: []
         '400': { $ref: '#/components/responses/BadRequest' }
 
@@ -76,9 +76,10 @@ paths:
       operationId: placeOrder
       summary: Place an order under a promise
       description: |
-        Verifies the promise token (signature, expiry, same basket), holds the items at the promised store, takes
-        payment and confirms the order. Retrying with the same `Idempotency-Key` returns the original outcome
-        instead of creating a second order.
+        Verifies the promise token (signature, expiry, same basket, a delivery location within 100 m of the promised
+        one, a store still taking orders), holds the items at the promised store, takes payment and confirms the
+        order. Retrying with the same `Idempotency-Key` returns the original outcome, byte for byte and marked with
+        `Idempotent-Replayed: true`, instead of creating a second order. A promise converts to at most one live order.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -93,26 +94,46 @@ paths:
             Location:
               schema: { type: string }
               description: URL of the new order.
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Order' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '402':
           description: Payment declined (`PAYMENT_DECLINED`). Nothing is held.
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
           description: |
-            `OUT_OF_STOCK`: an item sold out after the promise was made (`shortages` lists what is missing; ask for a
-            new promise). `IDEMPOTENCY_REQUEST_IN_PROGRESS`: the same key is still being processed; retry later.
+            - `OUT_OF_STOCK`: an item sold out after the promise was made (`shortages` lists what is missing; ask for a
+              new promise).
+            - `STORE_UNAVAILABLE`: the promised store stopped taking orders after the promise; ask for a new promise.
+            - `PROMISE_ALREADY_USED`: another live order was already placed under this promise.
+            - `HOLD_EXPIRED`: payment finished after the stock hold expired; the order was abandoned (any approved
+              authorization is voided asynchronously).
+            - `IDEMPOTENCY_REQUEST_IN_PROGRESS`: the same key is still being processed; retry after `Retry-After`.
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1, maximum: 2 }
+              description: Seconds to wait before retrying; sent with IDEMPOTENCY_REQUEST_IN_PROGRESS.
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
           description: |
             The request is well-formed but cannot be honoured: `PROMISE_EXPIRED`, `PROMISE_INVALID`,
-            `PROMISE_CART_MISMATCH`, `UNKNOWN_SKU`, or `IDEMPOTENCY_KEY_REUSED` (same key, different request).
+            `PROMISE_CART_MISMATCH`, `PROMISE_LOCATION_MISMATCH` (the delivery location is more than 100 m from the
+            promised one), `UNKNOWN_SKU`, or `IDEMPOTENCY_KEY_REUSED` (same key, different request).
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -133,6 +154,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Order' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/stores:
@@ -287,6 +309,11 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
 components:
+  headers:
+    IdempotentReplayed:
+      description: Present and `true` when the response is a stored answer to an earlier request with the same key.
+      schema: { type: string, enum: ['true'] }
+
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -426,7 +453,9 @@ components:
           minItems: 1
           maxItems: 50
           items: { $ref: '#/components/schemas/CartLine' }
-        deliveryLocation: { $ref: '#/components/schemas/GeoPoint' }
+        deliveryLocation:
+          $ref: '#/components/schemas/GeoPoint'
+          description: Must be within 100 m of the location the promise was made for.
         paymentMethod:
           type: string
           enum: [CARD, CASH_ON_DELIVERY]
@@ -544,6 +573,20 @@ components:
         detail: { type: string }
         instance: { type: string }
         code: { type: string, examples: [OUT_OF_STOCK] }
+        errors:
+          type: array
+          description: Present with VALIDATION_FAILED, one entry per invalid field.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+        storeId: { $ref: '#/components/schemas/StoreId' }
+        sku: { $ref: '#/components/schemas/Sku' }
+        onHand: { type: integer, description: 'Present with STOCK_BELOW_RESERVED.' }
+        reserved: { type: integer, description: 'Present with STOCK_BELOW_RESERVED.' }
+        delta: { type: integer, description: 'Present with STOCK_BELOW_RESERVED.' }
         shortages:
           type: array
           description: Present with OUT_OF_STOCK.

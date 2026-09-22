@@ -36,3 +36,14 @@ rolls back.
   ADR-0003).
 - **Avro/Protobuf with a schema registry**: stronger schema evolution tooling; JSON keeps the system easy to inspect
   while the event set is small. Revisit when external consumers appear.
+
+## Amendment (2026-09-22, wave-1 review)
+
+- **Kafka is the default publisher.** The logging publisher, which marks events published without sending them, is an
+  explicit opt-in for local runs, so a missing setting in production can never drop events silently.
+- **Producer settings are checked at startup** (`acks=all`, explicit `enable.idempotence=true`, at most five requests
+  in flight, `max.block.ms` no longer than the relay's send timeout).
+- **A failing event backs off** exponentially (1 s doubling to 5 min, `next_attempt_at`) with throttled logs; events
+  after it wait, preserving per-key order. Alert on `daqiqa.outbox.failures` and on the backlog gauge.
+- **Marking events published uses the partial index** (`AND published_at IS NULL`): 0.6 ms instead of 30 ms at 300,000
+  retained rows.

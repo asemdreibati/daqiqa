@@ -29,3 +29,10 @@ snapshot replaced atomically when stores change, so readers never lock.
 - **Geohash**: rectangular cells with uneven neighbour distances and edge effects.
 - **Polygons per store**: more expressive (real delivery zones) and a good future extension; H3 cells can be generated
   from polygons, so the index design survives it.
+
+## Amendment (2026-09-22, wave-1 review)
+
+Precomputing only the cells whose *centre* lies within the radius misses customers inside the radius who live in a
+boundary cell whose centre is outside it. The index therefore holds every cell within the radius plus one cell's
+circumradius (measured at about 1.10 × the edge length worldwide, 1.03 × in the Gulf), and the exact-distance check on
+the few candidates removes the false positives. The index is a superset by construction; the answer is exact.
