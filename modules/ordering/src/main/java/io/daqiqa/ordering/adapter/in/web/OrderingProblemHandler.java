@@ -1,5 +1,6 @@
 package io.daqiqa.ordering.adapter.in.web;
 
+import io.daqiqa.ordering.adapter.in.web.Problems.InvalidField;
 import io.daqiqa.ordering.application.CheckoutInProgressException;
 import io.daqiqa.ordering.application.IdempotencyKeyReusedException;
 import io.daqiqa.ordering.application.OrderNotFoundException;
@@ -7,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Stream;
 import org.springframework.context.MessageSourceResolvable;
 import org.springframework.core.MethodParameter;
 import org.springframework.core.Ordered;
@@ -16,7 +18,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
-import org.springframework.validation.FieldError;
+import org.springframework.validation.Errors;
 import org.springframework.validation.method.ParameterErrors;
 import org.springframework.validation.method.ParameterValidationResult;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -51,45 +53,42 @@ class OrderingProblemHandler {
                     "Idempotency key missing",
                     "Placing an order requires an Idempotency-Key header; a new UUID per order is ideal.");
         }
-        return Problems.validationFailed("Header " + e.getHeaderName() + " is required");
+        return Problems.validationFailed(List.of(new InvalidField(e.getHeaderName(), "is required")));
     }
 
     @ExceptionHandler
     ProblemDetail invalidBody(MethodArgumentNotValidException e) {
-        List<String> errors = new ArrayList<>();
-        e.getBindingResult().getFieldErrors().forEach(error -> errors.add(describe(error)));
-        e.getBindingResult().getGlobalErrors().forEach(error -> errors.add(message(error)));
-        return validationFailed(errors);
+        return Problems.validationFailed(invalidFields(e.getBindingResult()));
     }
 
     @ExceptionHandler
     ProblemDetail invalidArguments(HandlerMethodValidationException e) {
-        List<String> errors = new ArrayList<>();
+        List<InvalidField> errors = new ArrayList<>();
         for (ParameterValidationResult result : e.getParameterValidationResults()) {
             if (result instanceof ParameterErrors body) {
-                body.getFieldErrors().forEach(error -> errors.add(describe(error)));
+                errors.addAll(invalidFields(body));
             } else {
                 String parameter = label(result.getMethodParameter());
-                result.getResolvableErrors().forEach(error -> errors.add(parameter + ": " + message(error)));
+                result.getResolvableErrors().forEach(error -> errors.add(new InvalidField(parameter, message(error))));
             }
         }
-        return validationFailed(errors);
+        return Problems.validationFailed(errors);
     }
 
-    @ExceptionHandler
-    ProblemDetail unreadableBody(HttpMessageNotReadableException e) {
-        // The parser's message names internal types; the client only needs to know the body is not what we accept.
-        return Problems.validationFailed("The request body is not a valid JSON document of the expected shape");
+    /** Unreadable JSON, a wrong type or an unknown enum value. The parser's message would leak internals. */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ProblemDetail unreadableBody() {
+        return Problems.invalidRequest("The request body is missing or is not valid JSON of the expected shape");
     }
 
     @ExceptionHandler
     ProblemDetail malformedPathVariable(MethodArgumentTypeMismatchException e) {
-        return Problems.validationFailed(e.getName() + " is malformed");
+        return Problems.invalidRequest("Invalid value for '" + e.getName() + "'");
     }
 
     @ExceptionHandler
     ProblemDetail invalidRequest(InvalidRequestException e) {
-        return Problems.validationFailed(Objects.requireNonNullElse(e.getMessage(), "Invalid request"));
+        return Problems.invalidRequest(Objects.requireNonNullElse(e.getMessage(), "Invalid request"));
     }
 
     @ExceptionHandler
@@ -132,16 +131,14 @@ class OrderingProblemHandler {
         return Math.max(1, Math.min(MAX_RETRY_AFTER_SECONDS, leaseSeconds));
     }
 
-    private static ProblemDetail validationFailed(List<String> errors) {
-        // Sorted, so the same invalid request always gets the same answer.
-        return Problems.validationFailed(
-                errors.isEmpty()
-                        ? "Invalid request"
-                        : String.join("; ", errors.stream().sorted().toList()));
-    }
-
-    private static String describe(FieldError error) {
-        return error.getField() + ": " + message(error);
+    /** The body's invalid fields; an error on the object itself is reported under the object's name. */
+    private static List<InvalidField> invalidFields(Errors errors) {
+        return Stream.concat(
+                        errors.getFieldErrors().stream()
+                                .map(error -> new InvalidField(error.getField(), message(error))),
+                        errors.getGlobalErrors().stream()
+                                .map(error -> new InvalidField(error.getObjectName(), message(error))))
+                .toList();
     }
 
     private static String message(MessageSourceResolvable error) {

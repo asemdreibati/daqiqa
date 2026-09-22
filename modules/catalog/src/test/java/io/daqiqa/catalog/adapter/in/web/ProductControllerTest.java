@@ -71,8 +71,9 @@ class ProductControllerTest {
                 .hasStatus(HttpStatus.NOT_FOUND)
                 .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
                 .bodyJson()
-                .extractingPath("$.code")
-                .isEqualTo("PRODUCT_NOT_FOUND");
+                .isLenientlyEqualTo("""
+                        {"type": "urn:daqiqa:problem:product-not-found", "status": 404,
+                         "code": "PRODUCT_NOT_FOUND"}""");
     }
 
     @Test

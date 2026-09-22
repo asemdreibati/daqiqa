@@ -2,13 +2,22 @@ package io.daqiqa.catalog.adapter.in.web;
 
 import io.daqiqa.catalog.application.ProductNotFoundException;
 import java.net.URI;
+import java.util.Locale;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-/** Maps catalog failures to RFC 9457 problem details with a stable, machine-readable {@code code}. */
+/**
+ * Maps catalog failures to RFC 9457 problem details with a stable, machine-readable {@code code}.
+ *
+ * <p>Ordered first, like every module's handler, so that it answers for these controllers before the
+ * application-wide handler, which takes anything left as an internal error.
+ */
 @RestControllerAdvice(basePackageClasses = ProductController.class)
+@Order(Ordered.HIGHEST_PRECEDENCE)
 class CatalogProblemHandler {
 
     @ExceptionHandler
@@ -24,7 +33,8 @@ class CatalogProblemHandler {
 
     private static ProblemDetail problem(HttpStatus status, String code, String title, String detail) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
-        problem.setType(URI.create("urn:daqiqa:problem:" + code.toLowerCase().replace('_', '-')));
+        problem.setType(
+                URI.create("urn:daqiqa:problem:" + code.toLowerCase(Locale.ROOT).replace('_', '-')));
         problem.setTitle(title);
         problem.setProperty("code", code);
         return problem;
